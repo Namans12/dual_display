@@ -13,6 +13,7 @@ This first slice proves:
 
 ```text
 windows-sender/       Windows sender launcher for FFmpeg capture + H.264 encode
+mac-host/             macOS sender using ScreenCaptureKit + VideoToolbox
 android-receiver/     Kotlin Android receiver app using MediaCodec
 docs/                 Protocol and build notes
 ```
@@ -39,4 +40,11 @@ ExtendedDisplaySender.exe --host 127.0.0.1 --port 5000 --fps 60 --width 2560 --h
 
 - Replace the FFmpeg launcher with native DXGI Desktop Duplication + NVENC.
 - Add the Microsoft Indirect Display Driver so Windows exposes the tablet as a real monitor.
+- Add a Mac virtual display source, then capture it with the existing Mac host path.
 - Add Android touch event uplink and Windows `SendInput` injection.
+
+## Platform Hosts
+
+- Windows: DXGI Desktop Duplication through FFmpeg `ddagrab`, H.264 via NVENC/x264.
+- Mac: `ScreenCaptureKit`, H.264 via `VideoToolbox`.
+- Android: shared receiver, unchanged across Windows/Mac hosts.

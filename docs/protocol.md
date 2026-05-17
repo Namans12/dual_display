@@ -10,7 +10,7 @@ This keeps Android decoding simple because `MediaCodec` can consume Annex-B NAL 
 
 ## Video
 
-Windows sender:
+Desktop sender:
 
 ```text
 desktop capture -> H.264 low-latency encode -> TCP bytes
