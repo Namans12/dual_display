@@ -1,0 +1,27 @@
+.codex/
+build/
+.gradle/
+*.iml
+local.properties
+android-receiver/app/build/
+windows-sender/build/
+
+# Local workspace starter file, not part of the app.
+get_started.md
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Native build products.
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+
+# Android artifacts.
+*.apk
+*.aab
