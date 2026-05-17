@@ -22,6 +22,11 @@ Thumbs.db
 *.obj
 *.pdb
 
+# SwiftPM / macOS.
+.build/
+.swiftpm/
+Package.resolved
+
 # Android artifacts.
 *.apk
 *.aab

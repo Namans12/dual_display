@@ -57,3 +57,7 @@ Fallback if `ddagrab` is unavailable in your FFmpeg build:
 ```powershell
 .\build\Release\ExtendedDisplaySender.exe --host <tablet-ip> --gdi
 ```
+
+## Mac Sender
+
+See [mac.md](mac.md).
