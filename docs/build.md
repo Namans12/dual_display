@@ -2,30 +2,19 @@
 
 ## Android Receiver
 
-Open `android-receiver/` in Android Studio, then run the `app` configuration on the tablet.
-
-Command line:
+Open `android-receiver/` in Android Studio, or:
 
 ```bash
 cd android-receiver
-gradle :app:assembleDebug
+./gradlew :app:assembleRelease     # installable (debug-signed) release APK
+./gradlew :app:assembleDebug
 ```
 
-The app is landscape/fullscreen and listens on TCP `5000`.
+APKs land in `app/build/outputs/apk/{release,debug}/`. The app is landscape/fullscreen and listens on TCP `5000`.
 
 ## Windows Sender
 
-The Phase 1 sender is intentionally a thin native launcher around FFmpeg. It uses FFmpeg's `ddagrab` source by default, which captures through Windows Desktop Duplication, then encodes H.264 for the Android receiver.
-
-Requirements:
-
-- Windows 10/11
-- FFmpeg available on `PATH`
-- FFmpeg build with `ddagrab` support, or use `--gdi`
-- NVIDIA driver with NVENC support, or use `--x264`
-- CMake + MSVC Build Tools
-
-Build:
+Requirements: Windows 10 1903+, CMake + MSVC Build Tools. (End users get ffmpeg/adb from the installer; for development have `ffmpeg.exe` — full GPL build with `ddagrab` — and `adb.exe` on PATH or beside the exe.)
 
 ```powershell
 cd windows-sender
@@ -33,31 +22,44 @@ cmake -S . -B build
 cmake --build build --config Release
 ```
 
-Run over WiFi:
+Run it with no arguments for the full plug-and-play flow:
 
 ```powershell
-.\build\Release\ExtendedDisplaySender.exe --host <tablet-ip> --port 5000 --fps 60 --width 2560 --height 1600
+.\build\Release\ExtendedDisplaySender.exe
 ```
 
-Run over USB-C with ADB:
+CLI reference:
 
-```powershell
-adb forward tcp:5000 tcp:5000
-.\build\Release\ExtendedDisplaySender.exe --host 127.0.0.1 --port 5000 --fps 60 --width 2560 --height 1600
+```text
+--port N          Local forward port (default 5000)
+--fps N           Frame rate (default 60)
+--bitrate KBPS    Encoder bitrate in kbps (default 25000)
+--display N       Capture a specific display (see --list-displays)
+--list-displays   Print the display table and exit
+--width/--height  Scale output (default: captured display's native size)
+--encoder NAME    Pin encoder: nvenc | qsv | amf | x264
+--no-zerocopy     Disable the GPU-only NVENC path
+--no-touch        Disable tablet touch -> mouse injection
+--hevc            H.265/HEVC (sharper at high resolution)
+--hdr             HDR10 (auto-enables Windows HDR on the virtual display; implies --hevc)
+--wifi            Wi-Fi: auto-discover the tablet on the LAN (UDP broadcast), then TCP
+--udp             Low-latency UDP video over Wi-Fi (needs --wifi or --host)
+--host IP         Wi-Fi to a specific tablet IP (manual fallback), skip adb
 ```
 
-Fallback if NVENC is unavailable:
+Behavior: waits for the tablet (USB via adb, or Wi-Fi via UDP discovery — auto-selected), extends onto the VirtualDrivers VDD virtual display (activating it only while streaming), installs/launches the receiver, probes encoders NVENC→QSV→AMF→MF→x264 (HEVC variants with `--hevc`/`--hdr`), streams at the display's native resolution, auto-falls-back on encoder failure, and auto-reconnects on disconnect.
 
-```powershell
-.\build\Release\ExtendedDisplaySender.exe --host <tablet-ip> --x264
+## Mac Host
+
+```bash
+cd mac-host
+swift build -c release
+.build/release/MacHost --host 127.0.0.1 --port 5000   # after: adb forward tcp:5000 tcp:5000
 ```
 
-Fallback if `ddagrab` is unavailable in your FFmpeg build:
+See [mac.md](mac.md) for the .app/.dmg packaging and the extended-display setup.
 
-```powershell
-.\build\Release\ExtendedDisplaySender.exe --host <tablet-ip> --gdi
-```
+## Installers
 
-## Mac Sender
-
-See [mac.md](mac.md).
+- Windows: [installers/windows/README.md](../installers/windows/README.md) — `build-payload.ps1` then `ISCC.exe installer.iss` → `dist/ExtendedDisplaySetup.exe`.
+- Mac: run `installers/mac/build-dmg.sh` **on a Mac** → `installers/mac/dist/ExtendedDisplay.dmg`.

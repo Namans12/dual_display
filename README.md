@@ -1,50 +1,85 @@
-# Extended Display PoC
+# Extended Display
 
-Phase 1 proof of concept for a low-latency Windows-to-Android extended-display pipeline.
+Turn an Android tablet into a true **extended display** (not a mirror) for a Windows PC or Mac — at the tablet's **native resolution, 120 Hz, with HDR10**, over **USB or Wi-Fi**, with **touch and S Pen** control of the PC.
 
-This first slice proves:
+Built and verified on a Samsung Galaxy Tab S9 Ultra (2960×1848) + Windows 11.
 
-- Windows captures the desktop and encodes H.264.
-- Android receives an H.264 Annex-B stream over TCP.
-- Android decodes with `MediaCodec` and renders directly to a `SurfaceView`.
-- The same socket path can later be carried over USB with `adb reverse` / `adb forward`.
+## For Users — Windows
+
+1. Run **`ExtendedDisplaySetup.exe`**, keeping the **virtual display driver** option ticked.
+2. On the tablet: enable Developer Options → USB debugging (only needed for the USB path).
+3. Double-click the **Extended Display** shortcut.
+
+It figures out the rest: finds (or creates) the extended display, locates the tablet **over USB or Wi-Fi automatically**, installs/launches the app on it, picks the best encoder for your GPU, and starts streaming. Unplug/replug or drop Wi-Fi and it reconnects.
+
+```powershell
+ExtendedDisplaySender.exe              # auto: USB if plugged, else Wi-Fi
+ExtendedDisplaySender.exe --hdr        # HDR10 (10-bit, auto-enables Windows HDR)
+ExtendedDisplaySender.exe --hevc       # H.265 (sharper at high resolution)
+ExtendedDisplaySender.exe --wifi --udp # wireless, low-latency UDP video
+ExtendedDisplaySender.exe --bitrate 40000   # crisper text
+```
+
+## For Users — Mac
+
+Build `ExtendedDisplay.dmg` on a Mac with [installers/mac/build-dmg.sh](installers/mac/build-dmg.sh) (see [docs/mac.md](docs/mac.md)), drag to Applications, plug in the tablet, launch. (Mac host shares the Android app and protocol; HDR/native-virtual-display are Windows-only so far.)
+
+## Capabilities
+
+| | |
+|---|---|
+| **Display** | Clean single virtual monitor at native 2960×1848, **120 Hz**, **HDR10** — via the VirtualDrivers IddCx driver. No phantom monitors, no per-launch elevation. |
+| **Codecs** | H.264 + **HEVC** (HDR uses HEVC Main10). Encoder auto-ladder: NVENC → Intel QSV → AMD AMF → **Media Foundation** → x264/x265, so it works on any GPU. |
+| **Transport** | **USB** (adb) and **Wi-Fi** with zero-config discovery. Video over reliable TCP or low-latency **UDP**; touch always on reliable TCP. |
+| **Input** | Multi-touch, two-finger scroll/pinch, long-press right-click, and **S Pen** with pressure / hover / eraser → injected as real Windows touch + pen. |
+
+## How It Works
+
+```text
+  ┌─ Windows host ──────────────────────────────────────────────┐
+  │  VirtualDrivers VDD (IddCx) → native 2960x1848 / 120Hz / HDR │
+  │     ↓ DXGI capture (ddagrab)                                 │
+  │  NVENC / QSV / AMF / MF / x264·x265  (H.264 or HEVC Main10)  │
+  │     ↓                                                        │
+  │  TCP (tcp://tablet:5000)  or  UDP fragments (--udp)          │
+  │     ↑ touch/S-Pen, always TCP 5001                           │
+  └──── discovery: UDP broadcast 5002 ; lifecycle: CCD topology ─┘
+                          ↕  USB (adb) or Wi-Fi
+  ┌─ Android app ───────────────────────────────────────────────┐
+  │  TCP splitter + UDP reassembler → MediaCodec → SurfaceView   │
+  │  touch/S-Pen uplink (protocol v2) ; mDNS-free discovery reply│
+  └─────────────────────────────────────────────────────────────┘
+```
+
+The virtual display exists **only while streaming**: the sender extends onto it via the Windows CCD topology API on connect and collapses back on exit (no elevation, no leftover monitor). See [docs/protocol.md](docs/protocol.md) for wire formats.
 
 ## Project Layout
 
 ```text
-windows-sender/       Windows sender launcher for FFmpeg capture + H.264 encode
-mac-host/             macOS sender using ScreenCaptureKit + VideoToolbox
-android-receiver/     Kotlin Android receiver app using MediaCodec
-docs/                 Protocol and build notes
+windows-sender/     C++ host: display discovery, VDD topology, USB/Wi-Fi
+                    transport, encoder ladder, ffmpeg supervision, touch inject
+android-receiver/   Kotlin app: MediaCodec decode, TCP/UDP receive, touch uplink
+mac-host/           macOS host (ScreenCaptureKit + VideoToolbox)
+installers/windows/ Inno Setup installer + payload/VDD-install scripts
+installers/mac/     .app bundle + .dmg build script
+docs/               protocol, build, extended-display, mac notes
 ```
 
-## Phase 1 Run Path
+## Developer Builds
 
-1. Install FFmpeg on Windows with NVENC support.
-2. Build and install the Android app on the tablet.
-3. Start the Android receiver. It listens on TCP port `5000`.
-4. On Windows, run the sender with the tablet IP:
+See [docs/build.md](docs/build.md) for building each component and the full CLI, and [installers/windows/README.md](installers/windows/README.md) for producing the installer.
 
-```powershell
-ExtendedDisplaySender.exe --host 192.168.1.50 --port 5000 --fps 60 --width 2560 --height 1600
-```
+## Troubleshooting
 
-For USB-C using ADB port forwarding, run:
+- **Waiting for a tablet forever** — USB: charge-only cable or USB-debugging off/unauthorized. Wi-Fi: tablet not on the same LAN, or the app isn't open.
+- **"No extended display available" (exit 2)** — re-run the installer with the driver option ticked; see [docs/extended-display.md](docs/extended-display.md).
+- **"falling back to..."** — normal; the encoder ladder is finding what your GPU supports.
+- **Soft/blurry text** — raise `--bitrate` (default 25000).
+- **HDR washed out / unavailable** — needs Windows 11 23H2+ and HEVC; `--hdr` auto-enables Windows HDR on the virtual display.
+- **ddagrab errors** — needs Windows 10 1903+ and a full GPL FFmpeg (the installer bundles one).
 
-```powershell
-adb forward tcp:5000 tcp:5000
-ExtendedDisplaySender.exe --host 127.0.0.1 --port 5000 --fps 60 --width 2560 --height 1600
-```
+## Roadmap (not yet built)
 
-## Next Phases
-
-- Replace the FFmpeg launcher with native DXGI Desktop Duplication + NVENC.
-- Add the Microsoft Indirect Display Driver so Windows exposes the tablet as a real monitor.
-- Add a Mac virtual display source, then capture it with the existing Mac host path.
-- Add Android touch event uplink and Windows `SendInput` injection.
-
-## Platform Hosts
-
-- Windows: DXGI Desktop Duplication through FFmpeg `ddagrab`, H.264 via NVENC/x264.
-- Mac: `ScreenCaptureKit`, H.264 via `VideoToolbox`.
-- Android: shared receiver, unchanged across Windows/Mac hosts.
+- Wireless security: QR pairing + encrypted LAN stream (currently open/plaintext on a trusted LAN).
+- UDP loss resilience: FEC + on-demand keyframes + RTT-adaptive bitrate.
+- Native macOS virtual display (CGVirtualDisplay) and Mac HDR.

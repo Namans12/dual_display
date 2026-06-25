@@ -1,0 +1,44 @@
+<?xml version='1.0' encoding='utf-8'?>
+<vdd_settings>
+    <monitors>
+        <count>1</count>
+    </monitors>
+    <gpu>
+        <friendlyname>default</friendlyname>
+    </gpu>
+    <global>
+        <!-- Replicated to every resolution below -->
+        <g_refresh_rate>60</g_refresh_rate>
+        <g_refresh_rate>120</g_refresh_rate>
+    </global>
+    <resolutions>
+        <!-- Galaxy Tab S9 Ultra native panel -->
+        <resolution>
+            <width>2960</width>
+            <height>1848</height>
+            <refresh_rate>120</refresh_rate>
+        </resolution>
+        <!-- Lighter-load fallback (same 16:10 shape) -->
+        <resolution>
+            <width>2560</width>
+            <height>1600</height>
+            <refresh_rate>120</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1920</width>
+            <height>1200</height>
+            <refresh_rate>120</refresh_rate>
+        </resolution>
+    </resolutions>
+    <options>
+        <CustomEdid>false</CustomEdid>
+        <PreventSpoof>false</PreventSpoof>
+        <EdidCeaOverride>false</EdidCeaOverride>
+        <HardwareCursor>true</HardwareCursor>
+        <SDR10bit>false</SDR10bit>
+        <!-- HDR10/12-bit. Mutually exclusive with SDR10bit (kept false above). -->
+        <HDRPlus>true</HDRPlus>
+        <logging>false</logging>
+        <debuglogging>false</debuglogging>
+    </options>
+</vdd_settings>

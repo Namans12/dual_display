@@ -1,4 +1,5 @@
 .codex/
+.claude/
 build/
 .gradle/
 *.iml
