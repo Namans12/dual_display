@@ -187,7 +187,7 @@ namespace ExtendedDisplay
             if (chkEncrypt.Checked)
             {
                 pairCode = GenerateCode();
-                lblCode.Text = "Pairing code:  " + pairCode + "   → type it on the tablet";
+                lblCode.Text = "Pairing code:   " + pairCode;
             }
             else { pairCode = ""; lblCode.Text = ""; }
         }

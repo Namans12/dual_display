@@ -205,6 +205,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
 
         setContentView(rootLayout)
+        // Don't let the pairing field grab focus on launch (that popped the keyboard
+        // and blocked the screen). It only takes focus when the user taps it.
+        rootLayout.isFocusableInTouchMode = true
+        rootLayout.requestFocus()
         hideSystemUi()
         Log.i(TAG, "onCreate done; touch capture via dispatchTouchEvent is active")
     }
@@ -288,7 +292,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
         touchUplink.send(
             type = type,
-            tool = toolCode(event.getToolType(i)),
+            tool = toolCode(event, i),
             pointerId = event.getPointerId(i),
             pointerCount = event.pointerCount,
             pressure = event.getPressure(i),
@@ -311,15 +315,27 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun toolCode(toolType: Int): Int = when (toolType) {
-        MotionEvent.TOOL_TYPE_STYLUS -> 1
+    private fun toolCode(event: MotionEvent, i: Int): Int = when (event.getToolType(i)) {
         MotionEvent.TOOL_TYPE_ERASER -> 2
+        // The Samsung S Pen has no separate eraser tip — it reports its side button
+        // as a button state. Treat "button held" as erase so it works in apps like
+        // Microsoft Whiteboard.
+        MotionEvent.TOOL_TYPE_STYLUS ->
+            if (event.buttonState and
+                (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_SECONDARY) != 0) 2 else 1
         else -> 0
     }
 
     // Letterbox: size the SurfaceView to the video's aspect ratio so 16:9
     // streams aren't stretched onto the 16:10 panel.
     private fun applyVideoSize(videoWidth: Int, videoHeight: Int) {
+        // Video is decoding, so no pairing is needed (either the host is open, or we
+        // already paired and the encrypted stream is flowing). Tuck the box away so
+        // it never lingers/blocks when encryption is off.
+        if (::pairPanel.isInitialized && pairPanel.visibility != View.GONE) {
+            pairPanel.visibility = View.GONE
+            hideSystemUi()
+        }
         val screenW = rootLayout.width
         val screenH = rootLayout.height
         if (screenW == 0 || screenH == 0 || videoWidth <= 0 || videoHeight <= 0) return

@@ -18,6 +18,14 @@ Improvements (Wi-Fi robustness + usability + security).
     like blocks), 8-char capped/auto-caps. Auto-apply on the 8th char is deferred a
     frame so the final character renders before the panel tucks away (it used to
     pair but the last char appeared to "not show").
+  - The pairing box no longer grabs focus/keyboard on launch and **auto-hides once
+    video is decoding** — so with encryption off it no longer lingers/blocks the
+    screen (previously it hung until a stop/reconnect). GUI code label trimmed to
+    just "Pairing code:  XXXXXXXX".
+- **S Pen eraser:** the Samsung S Pen has no eraser tip — it reports its side button
+  as a button state, not `TOOL_TYPE_ERASER`, so erase never fired. The receiver now
+  maps "stylus + side button held" to the eraser tool (works in e.g. MS Whiteboard).
+  Pressure and hover already worked.
 
 - **Wi-Fi loss resilience:** the UDP path now uses rolling **intra-refresh**
   (nvenc/x264) so a dropped packet self-heals within a refresh cycle instead of
