@@ -3,13 +3,19 @@ package com.heysnap.extdisplay
 import android.app.Activity
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.text.Editable
+import android.text.InputFilter
 import android.text.InputType
+import android.text.TextWatcher
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.Toast
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -97,6 +103,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
     private lateinit var statusView: TextView
     private lateinit var pairInput: EditText
+    private lateinit var pairPanel: LinearLayout
     private var receiver: H264TcpReceiver? = null
     private val touchUplink = TouchUplink()
     private val discovery = DiscoveryResponder()
@@ -121,31 +128,57 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             setPadding(18, 10, 18, 10)
         }
 
-        // Pairing: if the PC shows a pairing code (encryption on), type it here once.
-        // Leave empty for an open/trusted LAN. Applying a code encrypts the uplink.
+        // Pairing panel: if the PC shows a pairing code (encryption on), type it here
+        // once. Leave it be for an open/trusted LAN. A boxed, monospaced, letter-
+        // spaced field reads like separate blocks and shows every character clearly.
+        val pairTitle = TextView(this).apply {
+            text = "Pairing code (from PC)"
+            setTextColor(0xFFDDDDDD.toInt())
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 8)
+        }
+        val boxBg = GradientDrawable().apply {
+            setColor(0xEE1A1A1A.toInt())
+            cornerRadius = 14f
+            setStroke(2, 0xFF3A6EA5.toInt())
+        }
         pairInput = EditText(this).apply {
-            hint = "Pairing code (if PC shows one)"
+            hint = "--------"
             setTextColor(0xFFFFFFFF.toInt())
-            setHintTextColor(0xFF888888.toInt())
-            setBackgroundColor(0xCC000000.toInt())
-            setPadding(18, 10, 18, 10)
-            textSize = 14f
+            setHintTextColor(0xFF555555.toInt())
+            background = boxBg
+            setPadding(28, 16, 28, 16)
+            textSize = 26f
+            typeface = Typeface.MONOSPACE
+            letterSpacing = 0.5f
+            gravity = Gravity.CENTER
             isSingleLine = true
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            filters = arrayOf(InputFilter.LengthFilter(8), InputFilter.AllCaps())
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             imeOptions = EditorInfo.IME_ACTION_DONE
             setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_DONE) { applyPairingCode(text.toString().trim()); true }
                 else false
             }
-            // Codes are exactly 8 chars — auto-apply once fully entered.
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun afterTextChanged(s: android.text.Editable?) {
-                    val c = s?.toString()?.trim() ?: ""
-                    if (c.length == 8) applyPairingCode(c)
+            // Codes are exactly 8 chars. Auto-apply once full, but DEFER via post{}
+            // so the 8th character actually draws before the panel reacts (the old
+            // synchronous hide made the last char "not show" while it still paired).
+            addTextChangedListener(object : TextWatcher {
+                override fun afterTextChanged(s: Editable?) {
+                    if ((s?.length ?: 0) == 8) { val c = s.toString(); post { applyPairingCode(c) } }
                 }
                 override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, cc: Int) {}
                 override fun onTextChanged(s: CharSequence?, a: Int, b: Int, cc: Int) {}
             })
+        }
+        pairPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(pairTitle)
+            addView(pairInput, LinearLayout.LayoutParams(360, LinearLayout.LayoutParams.WRAP_CONTENT))
         }
 
         rootLayout = FrameLayout(this).apply {
@@ -162,12 +195,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 leftMargin = 18
                 topMargin = 18
             })
-            addView(pairInput, FrameLayout.LayoutParams(
-                640,
+            addView(pairPanel, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP or Gravity.CENTER_HORIZONTAL
             ).apply {
-                topMargin = 18
+                topMargin = 24
             })
         }
 
@@ -182,17 +215,22 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         if (code.isEmpty()) {
             pairingKey = null
             touchUplink.setKey(null)
+            receiver?.setKey(null)
             return
         }
+        if (code.length != 8) return  // wait until the full code is entered
         try {
             val key = Crypto.deriveKey(code)
             pairingKey = key
             touchUplink.setKey(key)
             receiver?.setKey(key)   // decrypt the (UDP) video too
-            pairInput.visibility = View.GONE
-            statusView.text = "Paired — link encrypted"
-            hideSystemUi()
             Log.i(TAG, "Paired: encryption enabled (key ${Crypto.hex(key).take(8)}…)")
+            statusView.text = "Paired — link encrypted"
+            // Show the completed code (green), then tuck the panel away — deferred so
+            // the final character is visible before it disappears.
+            pairInput.isEnabled = false
+            pairInput.setTextColor(0xFF66DD88.toInt())
+            pairPanel.postDelayed({ pairPanel.visibility = View.GONE; hideSystemUi() }, 700)
             Toast.makeText(this, "Paired — link encrypted", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Log.i(TAG, "Pairing failed: ${e.message}")

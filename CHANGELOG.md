@@ -14,6 +14,10 @@ Improvements (Wi-Fi robustness + usability + security).
   rejected and no video. Over Wi-Fi the GUI forces the UDP path when encrypting;
   over USB the video rides the physical adb link (touch still encrypted). Design,
   threat model, and remaining polish in [SECURITY.md](SECURITY.md).
+  - Pairing entry on the tablet is a boxed, monospaced, letter-spaced field (reads
+    like blocks), 8-char capped/auto-caps. Auto-apply on the 8th char is deferred a
+    frame so the final character renders before the panel tucks away (it used to
+    pair but the last char appeared to "not show").
 
 - **Wi-Fi loss resilience:** the UDP path now uses rolling **intra-refresh**
   (nvenc/x264) so a dropped packet self-heals within a refresh cycle instead of
