@@ -32,11 +32,12 @@ namespace ExtendedDisplay
         const string VddInstanceId = @"ROOT\DISPLAY\0000";
 
         RadioButton rbUsb, rbWifi;
-        CheckBox chkUdp, chkTouch, chkHevc, chkHdr;
+        CheckBox chkUdp, chkTouch, chkHevc, chkHdr, chkEncrypt;
         ComboBox cmbFps, cmbEnc;
         TextBox txtBit, txtIp;
         Button btnStart, btnStop;
-        Label lblStatus;
+        Label lblStatus, lblCode;
+        string pairCode = "";
         Process sender;
         string exePath;
         string liveFps = "";
@@ -48,7 +49,7 @@ namespace ExtendedDisplay
             exePath = ResolveSenderPath();
 
             Text = "Extended Display";
-            ClientSize = new Size(380, 430);
+            ClientSize = new Size(380, 470);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -79,20 +80,23 @@ namespace ExtendedDisplay
             grpVid.Controls.AddRange(new Control[] { lblFps, cmbFps, lblEnc, cmbEnc, lblBit, txtBit });
 
             // ── Options ───────────────────────────────────────────────────
-            var grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(356, 104) };
+            var grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(356, 130) };
             chkTouch = new CheckBox { Text = "Touch input  (tablet controls PC)", Location = new Point(12, 22), AutoSize = true, Checked = true };
             chkHevc = new CheckBox { Text = "HEVC / H.265  (better at high FPS)", Location = new Point(12, 48), AutoSize = true };
             chkHdr = new CheckBox { Text = "HDR  (experimental - HDR video only; desktop looks washed)", Location = new Point(12, 74), AutoSize = true };
-            grpOpt.Controls.AddRange(new Control[] { chkTouch, chkHevc, chkHdr });
+            chkEncrypt = new CheckBox { Text = "Encrypt  (require pairing code on the tablet)", Location = new Point(12, 100), AutoSize = true };
+            chkEncrypt.CheckedChanged += OnEncryptToggled;
+            grpOpt.Controls.AddRange(new Control[] { chkTouch, chkHevc, chkHdr, chkEncrypt });
 
-            // ── Status + buttons ──────────────────────────────────────────
-            lblStatus = new Label { Text = "Ready.", Location = new Point(14, 334), Size = new Size(356, 20), ForeColor = Color.DimGray };
-            btnStart = new Button { Text = "Start Streaming", Location = new Point(12, 360), Size = new Size(170, 36), BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-            btnStop = new Button { Text = "Stop", Location = new Point(198, 360), Size = new Size(170, 36), Enabled = false };
+            // ── Pairing code + status + buttons ───────────────────────────
+            lblCode = new Label { Text = "", Location = new Point(14, 360), Size = new Size(356, 22), ForeColor = Color.MediumBlue, Font = new Font("Consolas", 11f, FontStyle.Bold) };
+            lblStatus = new Label { Text = "Ready.", Location = new Point(14, 384), Size = new Size(356, 20), ForeColor = Color.DimGray };
+            btnStart = new Button { Text = "Start Streaming", Location = new Point(12, 408), Size = new Size(170, 36), BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            btnStop = new Button { Text = "Stop", Location = new Point(198, 408), Size = new Size(170, 36), Enabled = false };
             btnStart.Click += OnStart;
             btnStop.Click += OnStop;
 
-            Controls.AddRange(new Control[] { grpConn, grpVid, grpOpt, lblStatus, btnStart, btnStop });
+            Controls.AddRange(new Control[] { grpConn, grpVid, grpOpt, lblCode, lblStatus, btnStart, btnStop });
 
             FormClosing += (s, e) => { StopSender(); DisableVdd(); };
 
@@ -176,9 +180,33 @@ namespace ExtendedDisplay
             worker.RunWorkerAsync();
         }
 
+        // Toggling encryption mints a fresh pairing code and shows it. The user
+        // types it into the tablet once; both derive the same key.
+        void OnEncryptToggled(object s, EventArgs e)
+        {
+            if (chkEncrypt.Checked)
+            {
+                pairCode = GenerateCode();
+                lblCode.Text = "Pairing code:  " + pairCode + "   → type it on the tablet";
+            }
+            else { pairCode = ""; lblCode.Text = ""; }
+        }
+
+        // 8-char code from an unambiguous alphabet (no I/O/0/1), crypto-random.
+        static string GenerateCode()
+        {
+            const string abc = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+            var bytes = new byte[8];
+            using (var rng = System.Security.Cryptography.RandomNumberGenerator.Create()) rng.GetBytes(bytes);
+            var chars = new char[8];
+            for (int i = 0; i < 8; i++) chars[i] = abc[bytes[i] % abc.Length];
+            return new string(chars);
+        }
+
         void OnStart(object src, EventArgs e)
         {
             if (!File.Exists(exePath)) { SetStatus("Sender exe not found.", Color.Firebrick); return; }
+            if (chkEncrypt.Checked && pairCode.Length == 0) pairCode = GenerateCode();
 
             SetStatus("Enabling virtual display...", Color.DimGray);
             btnStart.Enabled = false;
@@ -215,6 +243,10 @@ namespace ExtendedDisplay
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                 };
+                // Pass the pairing code out-of-band (env, not argv) so it never shows
+                // in a process listing. The sender derives the key and encrypts.
+                if (chkEncrypt.Checked && pairCode.Length > 0)
+                    psi.EnvironmentVariables["EXTDISPLAY_KEY"] = pairCode;
                 sender = Process.Start(psi);
                 sender.EnableRaisingEvents = true;
                 // The sender's own messages (stdout) and ffmpeg's -stats (stderr)

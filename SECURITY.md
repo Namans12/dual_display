@@ -58,10 +58,12 @@ can't authenticate it, it reports "wrong pairing code" and disconnects.
 ## Staging (implement + verify each)
 
 1. **Crypto foundation** — BCrypt (C++) + javax.crypto (Kotlin) PBKDF2/AES-GCM
-   helpers with a round-trip self-test.
+   helpers with a round-trip self-test. ✅ **Done** — KDF verified byte-identical
+   across both platforms (`--crypto-selftest` / `--derive-key`).
 2. **Touch channel** — encrypt/authenticate port 5001 + code entry on the tablet +
-   code display in the GUI. Verify: correct code → touch works; wrong code →
-   rejected (no injection).
+   code display in the GUI. ✅ **Done + verified**: correct code → touch decrypts
+   and injects; wrong code → auth fails → rejected (no injection). Replay guard via
+   a monotonic nonce counter.
 3. **Video channel** — encrypt 5000 (UDP datagrams; route TCP through the sender).
    Verify: paired tablet shows the stream; sniffer/unpaired sees nothing usable.
 4. **Polish** — "wrong code" UX, remember pairing (store derived key on the tablet

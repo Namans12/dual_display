@@ -148,6 +148,11 @@ int cryptoSelfTest() {
     return 0;
 }
 
+// Set when a pairing code is supplied (env EXTDISPLAY_KEY): channels are encrypted.
+std::optional<std::array<uint8_t, kKeyLen>> g_pairKey;
+// Encrypted touch frame = [12B nonce][28B ciphertext][16B tag].
+constexpr int kTouchEncSize = kGcmNonceLen + 28 + kGcmTagLen;
+
 struct Options {
     int port = 5000;          // local forward port
     int fps = 60;
@@ -1170,22 +1175,52 @@ void runTouchBridge(const std::string adb, const std::string host, int localPort
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
                    reinterpret_cast<char*>(&rcvTimeout), sizeof(rcvTimeout));
 
-        unsigned char packet[kTouchPacketSize];
         bool connected = true;
-        while (connected && !g_stop.load()) {
-            if (!recvFull(sock, packet, kTouchPacketSize)) break;
-            // Resync: a mid-stream connect can land between packet boundaries;
-            // slide one byte at a time until the magic lines up.
-            while (readBe32(packet) != kTouchMagic) {
-                std::memmove(packet, packet + 1, kTouchPacketSize - 1);
-                if (!recvFull(sock, packet + kTouchPacketSize - 1, 1)) {
-                    connected = false;
+        if (g_pairKey) {
+            // Encrypted path: fixed-size AES-GCM frames. TCP keeps us aligned from
+            // the first packet; an auth failure means a wrong pairing code (or
+            // tampering) — there's nothing to resync to, so drop the connection.
+            AesGcm dec;
+            if (!dec.init(*g_pairKey)) { closesocket(sock); break; }
+            unsigned char enc[kTouchEncSize];
+            std::vector<uint8_t> pt;
+            uint64_t lastCtr = 0;
+            bool haveCtr = false;
+            while (connected && !g_stop.load()) {
+                if (!recvFull(sock, enc, kTouchEncSize)) break;
+                if (!dec.decrypt(enc, kTouchEncSize, pt) ||
+                    pt.size() != kTouchPacketSize || readBe32(pt.data()) != kTouchMagic) {
+                    // Wrong pairing code or tampering — reject (no input injection).
+                    // stderr is unbuffered so the GUI sees it promptly.
+                    fprintf(stderr, "Touch pairing/auth failed - check the code on the tablet.\n");
+                    fflush(stderr);
                     break;
                 }
+                // Replay guard: nonce = 4B random prefix + 8B big-endian counter.
+                uint64_t ctr = 0;
+                for (int i = 4; i < kGcmNonceLen; ++i) ctr = (ctr << 8) | enc[i];
+                if (haveCtr && ctr <= lastCtr) continue;  // drop replays / reorders
+                lastCtr = ctr; haveCtr = true;
+                if (readBe16(pt.data() + 4) != kTouchProtocolVersion) continue;
+                injector.handle(parseTouchPacket(pt.data()), display);
             }
-            if (!connected) break;
-            if (readBe16(packet + 4) != kTouchProtocolVersion) continue;  // drop
-            injector.handle(parseTouchPacket(packet), display);
+        } else {
+            unsigned char packet[kTouchPacketSize];
+            while (connected && !g_stop.load()) {
+                if (!recvFull(sock, packet, kTouchPacketSize)) break;
+                // Resync: a mid-stream connect can land between packet boundaries;
+                // slide one byte at a time until the magic lines up.
+                while (readBe32(packet) != kTouchMagic) {
+                    std::memmove(packet, packet + 1, kTouchPacketSize - 1);
+                    if (!recvFull(sock, packet + kTouchPacketSize - 1, 1)) {
+                        connected = false;
+                        break;
+                    }
+                }
+                if (!connected) break;
+                if (readBe16(packet + 4) != kTouchProtocolVersion) continue;  // drop
+                injector.handle(parseTouchPacket(packet), display);
+            }
         }
         closesocket(sock);
         injector.releaseAllContacts();  // don't leave fingers stuck down
@@ -1691,6 +1726,15 @@ int main(int argc, char** argv) {
     // Crypto smoke test (used in CI/dev): verify KDF + AES-GCM before shipping.
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--crypto-selftest") return cryptoSelfTest();
+        // Print the key derived from a code (hex) — used to confirm the Windows and
+        // Android KDFs agree. Dev-only.
+        if (std::string(argv[i]) == "--derive-key" && i + 1 < argc) {
+            std::array<uint8_t, kKeyLen> k{};
+            if (!deriveKey(argv[i + 1], k)) { std::cout << "derive failed\n"; return 1; }
+            for (uint8_t b : k) printf("%02x", b);
+            printf("\n");
+            return 0;
+        }
     }
     // Without DPI awareness, DesktopCoordinates come back scaled (e.g. a
     // 2560x1600 panel at 150% reports 1536x960) and we'd encode at the wrong size.
@@ -1699,6 +1743,22 @@ int main(int argc, char** argv) {
         Options options = parseArgs(argc, argv);  // host may be filled by --wifi discovery
         SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
         SetUnhandledExceptionFilter(crashHandler);
+
+        // Pairing: if the GUI (or the user) set a pairing code in EXTDISPLAY_KEY,
+        // derive the shared key and encrypt the channels. Passed via env, not the
+        // command line, so it never shows in a process listing.
+        {
+            char* keyEnv = nullptr; size_t keyEnvLen = 0;
+            if (_dupenv_s(&keyEnv, &keyEnvLen, "EXTDISPLAY_KEY") == 0 && keyEnv && *keyEnv) {
+                std::array<uint8_t, kKeyLen> k{};
+                if (deriveKey(keyEnv, k)) {
+                    g_pairKey = k;
+                    std::cout << "Pairing enabled — encrypting the link (enter the code on the tablet).\n";
+                }
+                SecureZeroMemory(keyEnv, keyEnvLen);
+            }
+            if (keyEnv) free(keyEnv);
+        }
 
         const std::string exeDir = exeDirectory();
 

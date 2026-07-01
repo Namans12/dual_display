@@ -2,7 +2,15 @@
 
 ## v0.8.0 — in progress
 
-Improvements (Wi-Fi robustness + usability).
+Improvements (Wi-Fi robustness + usability + security).
+
+- **Security — PIN pairing + encrypted touch (stages 1–2).** Opt-in "Encrypt" in
+  the GUI mints an 8-char pairing code; you type it on the tablet once. Both derive
+  the same AES-256 key via PBKDF2-HMAC-SHA256 (verified byte-identical across
+  Windows BCrypt and Android javax.crypto). The **touch/input channel is now
+  AES-256-GCM encrypted + authenticated** with a replay guard — verified: correct
+  code injects, wrong code is rejected (no unauthorized control of the PC). Video
+  encryption is the next stage. Design + threat model in [SECURITY.md](SECURITY.md).
 
 - **Wi-Fi loss resilience:** the UDP path now uses rolling **intra-refresh**
   (nvenc/x264) so a dropped packet self-heals within a refresh cycle instead of

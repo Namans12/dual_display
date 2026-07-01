@@ -4,9 +4,13 @@ import android.app.Activity
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Bundle
+import android.text.InputType
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.inputmethod.EditorInfo
+import android.widget.EditText
+import android.widget.Toast
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -22,9 +26,15 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
+import java.security.SecureRandom
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
 
 private const val TAG = "ExtDisplay"
@@ -40,13 +50,57 @@ private const val INITIAL_HEIGHT = 240
 private const val MIME_AVC = "video/avc"
 private const val MIME_HEVC = "video/hevc"
 
+/** PBKDF2-HMAC-SHA256 (matches the Windows sender) + AES-256-GCM. */
+private object Crypto {
+    private const val SALT = "ExtDisplay/v1"
+    private const val ITERS = 200000
+    fun deriveKey(code: String): ByteArray {
+        val spec = PBEKeySpec(code.toCharArray(), SALT.toByteArray(Charsets.US_ASCII), ITERS, 256)
+        return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+    }
+    fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
+}
+
+/**
+ * AES-256-GCM sealer/opener. Frame = [12B nonce][ciphertext][16B tag]; the nonce is
+ * a 4-byte random per-session prefix + an 8-byte big-endian counter, matching the
+ * sender's replay guard.
+ */
+private class Sealer(key: ByteArray) {
+    private val keySpec = SecretKeySpec(key, "AES")
+    private val prefix = ByteArray(4).also { SecureRandom().nextBytes(it) }
+    private var counter = 0L
+
+    @Synchronized fun seal(plain: ByteArray): ByteArray {
+        val nonce = ByteArray(12)
+        System.arraycopy(prefix, 0, nonce, 0, 4)
+        counter++
+        for (i in 0 until 8) nonce[4 + i] = ((counter ushr (8 * (7 - i))) and 0xff).toByte()
+        val c = Cipher.getInstance("AES/GCM/NoPadding")
+        c.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, nonce))
+        return nonce + c.doFinal(plain)  // doFinal appends the 16-byte tag
+    }
+
+    /** Decrypt a [12B nonce][ct][16B tag] frame; null on auth failure. (Stage 3.) */
+    fun open(frame: ByteArray, off: Int, len: Int): ByteArray? {
+        if (len < 12 + 16) return null
+        return try {
+            val c = Cipher.getInstance("AES/GCM/NoPadding")
+            c.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, frame, off, 12))
+            c.doFinal(frame, off + 12, len - 12)
+        } catch (_: Exception) { null }
+    }
+}
+
 class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var rootLayout: FrameLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var statusView: TextView
+    private lateinit var pairInput: EditText
     private var receiver: H264TcpReceiver? = null
     private val touchUplink = TouchUplink()
     private val discovery = DiscoveryResponder()
+    @Volatile private var pairingKey: ByteArray? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,6 +121,33 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             setPadding(18, 10, 18, 10)
         }
 
+        // Pairing: if the PC shows a pairing code (encryption on), type it here once.
+        // Leave empty for an open/trusted LAN. Applying a code encrypts the uplink.
+        pairInput = EditText(this).apply {
+            hint = "Pairing code (if PC shows one)"
+            setTextColor(0xFFFFFFFF.toInt())
+            setHintTextColor(0xFF888888.toInt())
+            setBackgroundColor(0xCC000000.toInt())
+            setPadding(18, 10, 18, 10)
+            textSize = 14f
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE) { applyPairingCode(text.toString().trim()); true }
+                else false
+            }
+            // Codes are exactly 8 chars — auto-apply once fully entered.
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    val c = s?.toString()?.trim() ?: ""
+                    if (c.length == 8) applyPairingCode(c)
+                }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, cc: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, cc: Int) {}
+            })
+        }
+
         rootLayout = FrameLayout(this).apply {
             setBackgroundColor(0xFF000000.toInt())
             addView(surfaceView, FrameLayout.LayoutParams(
@@ -81,11 +162,41 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 leftMargin = 18
                 topMargin = 18
             })
+            addView(pairInput, FrameLayout.LayoutParams(
+                640,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            ).apply {
+                topMargin = 18
+            })
         }
 
         setContentView(rootLayout)
         hideSystemUi()
         Log.i(TAG, "onCreate done; touch capture via dispatchTouchEvent is active")
+    }
+
+    // Derive the shared key from the PC's pairing code and encrypt the uplink.
+    // Empty code = open/plaintext (trusted LAN).
+    private fun applyPairingCode(code: String) {
+        if (code.isEmpty()) {
+            pairingKey = null
+            touchUplink.setKey(null)
+            return
+        }
+        try {
+            val key = Crypto.deriveKey(code)
+            pairingKey = key
+            touchUplink.setKey(key)
+            pairInput.visibility = View.GONE
+            statusView.text = "Paired — link encrypted"
+            hideSystemUi()
+            Log.i(TAG, "Paired: encryption enabled (key ${Crypto.hex(key).take(8)}…)")
+            Toast.makeText(this, "Paired — link encrypted", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.i(TAG, "Pairing failed: ${e.message}")
+            Toast.makeText(this, "Pairing failed: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     // Capture EVERY touch at the window level, before any child view can consume
@@ -593,7 +704,11 @@ private class TouchUplink {
     private val running = AtomicBoolean(false)
     private var server: ServerSocket? = null
     @Volatile private var current: Socket? = null
+    @Volatile private var sealer: Sealer? = null
     private val queue = LinkedBlockingQueue<ByteArray>(256)
+
+    /** Set the pairing key to encrypt outgoing touch packets, or null for plaintext. */
+    fun setKey(key: ByteArray?) { sealer = key?.let { Sealer(it) } }
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -677,7 +792,9 @@ private class TouchUplink {
         buf.putFloat(nx.coerceIn(0f, 1f))
         buf.putFloat(ny.coerceIn(0f, 1f))
         buf.putLong(timestampUs)
-        queue.offer(buf.array())
+        // Encrypt when paired (host derived the same key from the PIN); else plaintext.
+        val s = sealer
+        queue.offer(if (s != null) s.seal(buf.array()) else buf.array())
     }
 }
 
