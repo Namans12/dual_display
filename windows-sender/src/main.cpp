@@ -779,11 +779,9 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
         cmd << " -preset p1 -tune ull -rc cbr"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
             << " -zerolatency 1 -delay 0 -bf 0 -g " << options.fps;
-        // UDP is lossy: rolling intra-refresh spreads intra blocks across the GOP
-        // so a dropped packet self-heals within one refresh cycle instead of
-        // freezing/corrupting until the next full keyframe. No scene-cut IDRs
-        // (which would spike the bitrate and stall a Wi-Fi link).
-        if (options.udp) cmd << " -intra-refresh 1 -no-scenecut 1";
+        // NOTE: intra-refresh was tried for the UDP path but it removed the periodic
+        // IDR keyframes the decoder needs to (re)sync on a lossy Wi-Fi link, causing
+        // a permanent freeze. Periodic IDR (-g) recovers within ~1s, so keep it.
         if (options.hdr) cmd << " -profile:v main10";
     } else if (attempt.encoder.rfind("h264_qsv", 0) == 0 ||
                attempt.encoder.rfind("hevc_qsv", 0) == 0) {
@@ -805,10 +803,6 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
         cmd << " -preset ultrafast -tune zerolatency"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
             << " -bf 0 -g " << options.fps;
-        // UDP loss resilience via periodic intra-refresh (see nvenc note above).
-        if (options.udp && attempt.encoder.rfind("libx264", 0) == 0) {
-            cmd << " -x264opts intra-refresh=1:no-scenecut=1";
-        }
         if (options.hdr) cmd << " -profile:v main10";
     }
 
@@ -1442,6 +1436,10 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == INVALID_SOCKET) { WSACleanup(); return 0; }
+    // A keyframe bursts dozens of fragments at once; a big send buffer keeps the
+    // OS/Wi-Fi driver from dropping them on the floor (a common cause of UDP stutter).
+    int sndBuf = 4 << 20;  // 4 MB
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&sndBuf), sizeof(sndBuf));
     sockaddr_in dest{};
     dest.sin_family = AF_INET;
     dest.sin_port = htons(static_cast<u_short>(udpPort));

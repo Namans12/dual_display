@@ -29,12 +29,13 @@ Improvements (Wi-Fi robustness + usability + security).
   (`TOOL_TYPE_ERASER`, e.g. a flipped Surface Pen) but deliberately don't map the S
   Pen button (it only produced glitchy mixed strokes). See [Fixes.md](Fixes.md).
 
-- **Wi-Fi loss resilience:** the UDP path now uses rolling **intra-refresh**
-  (nvenc/x264) so a dropped packet self-heals within a refresh cycle instead of
-  freezing until the next keyframe — no keyframe bitrate spikes on a congested
-  link. Verified decoding cleanly on the tablet. (Full adaptive-bitrate/FEC/
-  on-demand-keyframes need a feedback channel + library encoder — see
-  [Fixes.md](Fixes.md).)
+- **UDP path robustness:** a bigger socket send buffer (4 MB) so a keyframe's
+  fragment burst isn't dropped by the OS/Wi-Fi driver. (Intra-refresh was tried but
+  **reverted** — removing periodic IDRs left the decoder with nothing to resync on
+  after Wi-Fi loss, causing a permanent freeze; periodic IDR recovers in ~1s.) On a
+  good 5 GHz link **TCP is smoother** than UDP (no dropped frames); UDP mainly helps
+  on lossy/high-latency links. Full adaptive-bitrate/FEC/on-demand-keyframes need a
+  feedback channel + library encoder — see [Fixes.md](Fixes.md).
 - **Manual tablet IP** in the GUI (and `--host` on the CLI) for networks that
   block the discovery broadcast (AP isolation, guest Wi-Fi). Empty = auto-discover.
 - **Live status line** in the GUI — the sender emits ffmpeg `-stats`, and the GUI
