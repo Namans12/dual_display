@@ -6,11 +6,14 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = (Resolve-Path "$PSScriptRoot\..\.."),
+    [string]$RepoRoot,
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
+# Resolve the repo root here (not in the param default) so $PSScriptRoot is
+# reliably set regardless of how the script is invoked.
+if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 $payload = Join-Path $PSScriptRoot 'payload'
 $temp = Join-Path ([System.IO.Path]::GetTempPath()) 'extdisplay-payload'
 New-Item -ItemType Directory -Force $payload | Out-Null
@@ -37,6 +40,15 @@ if (-not (Test-Path $exe)) {
 }
 Copy-Item $exe $payload -Force
 Write-Host "OK ExtendedDisplaySender.exe"
+
+# 1b. Settings GUI launcher (ExtendedDisplay.exe). Build it if missing.
+$gui = Join-Path $RepoRoot 'windows-sender\launcher\ExtendedDisplay.exe'
+if (-not (Test-Path $gui)) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'windows-sender\launcher\build.ps1') | Out-Null
+}
+if (-not (Test-Path $gui)) { throw "Launcher not built. Run windows-sender/launcher/build.ps1" }
+Copy-Item $gui $payload -Force
+Write-Host "OK ExtendedDisplay.exe (settings GUI)"
 
 # 2. Receiver APK (prefer release)
 $apkRelease = Join-Path $RepoRoot 'android-receiver\app\build\outputs\apk\release\app-release.apk'

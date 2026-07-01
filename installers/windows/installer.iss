@@ -3,7 +3,7 @@
 
 [Setup]
 AppName=Extended Display
-AppVersion=0.4.0
+AppVersion=0.7.1
 AppPublisher=HeySnap
 DefaultDirName={autopf}\Extended Display
 PrivilegesRequired=admin
@@ -25,15 +25,17 @@ Source: "install-vdd.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "uninstall-vdd.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Extended Display"; Filename: "{app}\ExtendedDisplaySender.exe"
-Name: "{autodesktop}\Extended Display"; Filename: "{app}\ExtendedDisplaySender.exe"; Tasks: desktopicon
+; Shortcuts point at the settings GUI (the recommended entry point). It manages
+; the virtual display, HDR, and starts/stops streaming.
+Name: "{autoprograms}\Extended Display"; Filename: "{app}\ExtendedDisplay.exe"
+Name: "{autodesktop}\Extended Display"; Filename: "{app}\ExtendedDisplay.exe"; Tasks: desktopicon
 
 [Run]
 ; Install the VirtualDrivers VDD. The monitor stays INACTIVE until the sender
 ; extends onto it on demand (CCD topology), so there's no phantom display while
 ; idle and no elevation needed at run time.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-vdd.ps1"" -AppDir ""{app}"""; StatusMsg: "Installing the virtual display driver..."; Flags: runhidden waituntilterminated; Tasks: installvdd
-Filename: "{app}\ExtendedDisplaySender.exe"; Description: "Launch Extended Display now"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\ExtendedDisplay.exe"; Description: "Launch Extended Display now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall-vdd.ps1"" -AppDir ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveVdd"

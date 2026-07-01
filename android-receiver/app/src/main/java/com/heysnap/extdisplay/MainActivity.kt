@@ -4,6 +4,7 @@ import android.app.Activity
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Bundle
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -25,6 +26,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
+private const val TAG = "ExtDisplay"
 private const val LISTEN_PORT = 5000
 private const val TOUCH_PORT = 5001
 private const val DISCOVERY_PORT = 5002
@@ -55,49 +57,6 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         touchUplink.start()
         discovery.start(applicationContext)
 
-        // Forward touches on the video area as normalized coordinates so the
-        // host can inject them onto the matching display rectangle.
-        // Protocol v2: one packet per pointer per event (multi-touch aware).
-        surfaceView.setOnTouchListener { view, event ->
-            if (view.width > 0 && view.height > 0) {
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
-                        sendPointer(view, event, event.actionIndex, 0)
-                    MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP ->
-                        sendPointer(view, event, event.actionIndex, 2)
-                    MotionEvent.ACTION_CANCEL ->
-                        for (i in 0 until event.pointerCount) sendPointer(view, event, i, 3)
-                    MotionEvent.ACTION_MOVE ->
-                        for (i in 0 until event.pointerCount) sendPointer(view, event, i, 1)
-                }
-            }
-            true
-        }
-
-        // S Pen hover arrives on the generic-motion path, not onTouch.
-        surfaceView.setOnGenericMotionListener { view, event ->
-            val type = when (event.actionMasked) {
-                MotionEvent.ACTION_HOVER_MOVE -> 4
-                MotionEvent.ACTION_HOVER_EXIT -> 5
-                else -> -1
-            }
-            if (type >= 0 && view.width > 0 && view.height > 0) {
-                touchUplink.send(
-                    type = type,
-                    tool = toolCode(event.getToolType(0)),
-                    pointerId = event.getPointerId(0),
-                    pointerCount = 0,
-                    pressure = 0f,
-                    nx = (event.getX(0) / view.width).coerceIn(0f, 1f),
-                    ny = (event.getY(0) / view.height).coerceIn(0f, 1f),
-                    timestampUs = event.eventTime * 1000
-                )
-                true
-            } else {
-                false
-            }
-        }
-
         statusView = TextView(this).apply {
             val ip = localWifiIp()
             text = if (ip != null) "Ready  •  Wi-Fi $ip  •  USB ready" else "Waiting on TCP $LISTEN_PORT"
@@ -125,18 +84,65 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
         setContentView(rootLayout)
         hideSystemUi()
+        Log.i(TAG, "onCreate done; touch capture via dispatchTouchEvent is active")
     }
 
-    /** Emits one v2 packet for the pointer at index [i] of [event]. */
-    private fun sendPointer(view: View, event: MotionEvent, i: Int, type: Int) {
+    // Capture EVERY touch at the window level, before any child view can consume
+    // it. This is far more reliable than a per-view OnTouchListener (a SurfaceView
+    // in particular does not always deliver touches to a listener). We still call
+    // through to super so the normal view hierarchy keeps working.
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
+                sendPointer(event, event.actionIndex, 0)
+            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP ->
+                sendPointer(event, event.actionIndex, 2)
+            MotionEvent.ACTION_CANCEL ->
+                for (i in 0 until event.pointerCount) sendPointer(event, i, 3)
+            MotionEvent.ACTION_MOVE ->
+                for (i in 0 until event.pointerCount) sendPointer(event, i, 1)
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    // S Pen hover (no contact) arrives on the generic-motion path.
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        val type = when (event.actionMasked) {
+            MotionEvent.ACTION_HOVER_MOVE -> 4
+            MotionEvent.ACTION_HOVER_EXIT -> 5
+            else -> -1
+        }
+        if (type >= 0) sendPointer(event, 0, type)
+        return super.onGenericMotionEvent(event)
+    }
+
+    private val locBuf = IntArray(2)
+    private var loggedFirstTouch = false
+
+    /**
+     * Emits one v2 packet for pointer [i] of [event]. Coordinates are window-
+     * relative (from dispatchTouchEvent); we normalize them against the video
+     * SurfaceView's on-screen rectangle so the host maps them onto the display.
+     */
+    private fun sendPointer(event: MotionEvent, i: Int, type: Int) {
+        val w = surfaceView.width
+        val h = surfaceView.height
+        if (w <= 0 || h <= 0) return
+        surfaceView.getLocationInWindow(locBuf)
+        val nx = ((event.getX(i) - locBuf[0]) / w).coerceIn(0f, 1f)
+        val ny = ((event.getY(i) - locBuf[1]) / h).coerceIn(0f, 1f)
+        if (!loggedFirstTouch) {
+            loggedFirstTouch = true
+            Log.i(TAG, "first touch: type=$type nx=$nx ny=$ny surface=${w}x$h")
+        }
         touchUplink.send(
             type = type,
             tool = toolCode(event.getToolType(i)),
             pointerId = event.getPointerId(i),
             pointerCount = event.pointerCount,
             pressure = event.getPressure(i),
-            nx = (event.getX(i) / view.width).coerceIn(0f, 1f),
-            ny = (event.getY(i) / view.height).coerceIn(0f, 1f),
+            nx = nx,
+            ny = ny,
             timestampUs = event.eventTime * 1000
         )
     }
@@ -596,14 +602,19 @@ private class TouchUplink {
                         reuseAddress = true
                         bind(InetSocketAddress(TOUCH_PORT))
                     }
+                    Log.i(TAG, "TouchUplink listening on $TOUCH_PORT")
                     server!!.accept().use { socket ->
                         socket.tcpNoDelay = true
                         queue.clear()
                         val out = socket.getOutputStream()
+                        Log.i(TAG, "TouchUplink client connected: ${socket.inetAddress}")
+                        var sent = 0
                         while (running.get()) {
                             val packet = queue.poll(500, TimeUnit.MILLISECONDS) ?: continue
                             out.write(packet)
                             out.flush()
+                            if (sent == 0) Log.i(TAG, "TouchUplink sent first packet")
+                            sent++
                         }
                     }
                 } catch (_: Exception) {

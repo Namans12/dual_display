@@ -1,6 +1,30 @@
 # Changelog
 
-## v0.7 — current
+## v0.7.1 — current
+
+Field-testing fixes on real hardware (Galaxy Tab S9 Ultra, wired USB).
+
+- **Touch fixed.** The Android receiver captured touches with a
+  `SurfaceView.setOnTouchListener`, which never fired (verified: even OS-injected
+  taps produced zero uplink packets). Moved capture to the Activity's
+  `dispatchTouchEvent`, which sees every touch before any child view. Receiver is
+  now **versionCode 8**; sender requires ≥ 8.
+- **HDR washout fixed.** Capturing an SDR stream while Windows HDR was enabled on
+  the virtual display looked washed-out / over-bright. The SDR path now explicitly
+  turns Windows Advanced Color **off** on the VDD at start (`setAdvancedColor`),
+  and `--hdr` turns it on — so colours are correct in both modes regardless of the
+  display's prior HDR state.
+- Receiver hardened against duplicate/relaunched instances: `launchMode=singleTask`
+  plus a broader `configChanges` set (a second instance used to steal the touch
+  port from the foreground one).
+- Added **`windows-sender/launcher/`** — a compiled WinForms settings GUI
+  (`ExtendedDisplay.exe`, elevation-manifested) to pick connection/codec/HDR/touch
+  options and start/stop streaming; disables the VDD device on stop so no ghost
+  monitor lingers. On open it also **auto-clears any leftover virtual display**
+  from a prior crash/force-kill (device-only disable, so real monitors are
+  untouched).
+
+## v0.7
 
 A complete plug-and-play extended-display system: native-resolution, 120 Hz,
 HDR10, wired + wireless, touch + S Pen, on any GPU.

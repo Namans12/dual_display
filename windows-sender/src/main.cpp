@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <dxgi.h>
+#include <cfgmgr32.h>
 
 #include <atomic>
 #include <cstdlib>
@@ -317,6 +318,11 @@ std::atomic<bool> g_vddExtended{false};
 void collapseToInternal() {
     if (g_vddExtended.exchange(false)) {
         SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_INTERNAL);
+        // Disable the VDD device node so it doesn't linger as a ghost monitor
+        // in Display Settings after streaming ends.
+        DEVINST devInst = 0;
+        if (CM_Locate_DevNodeA(&devInst, const_cast<char*>("ROOT\\DISPLAY\\0000"), CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS)
+            CM_Disable_DevNode(devInst, CM_DISABLE_UI_NOT_OK);
         std::cout << "Virtual display released (desktop back to primary only).\n";
     }
 }
@@ -324,10 +330,12 @@ void collapseToInternal() {
 std::optional<DisplayInfo> pickExtendedDisplay(const std::vector<DisplayInfo>& displays,
                                                int overrideIndex);
 
-// Turns on Windows Advanced Color (HDR) for the display with the given GDI
-// name (e.g. "\\.\DISPLAY5"). Required before ddagrab can capture a 10-bit
-// HDR10 framebuffer. Uses the CCD API with the SDK's own struct definitions.
-bool enableAdvancedColor(const std::string& gdiName) {
+// Turns Windows Advanced Color (HDR) on or off for the display with the given
+// GDI name (e.g. "\\.\DISPLAY5"). HDR must be ON for a 10-bit HDR10 capture, and
+// must be OFF for a normal SDR capture — capturing an HDR framebuffer as SDR
+// looks washed-out/over-bright, so the SDR path explicitly disables it.
+// Uses the CCD API with the SDK's own struct definitions.
+bool setAdvancedColor(const std::string& gdiName, bool enable) {
     UINT32 numPath = 0, numMode = 0;
     if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &numPath, &numMode) != ERROR_SUCCESS) {
         return false;
@@ -359,7 +367,7 @@ bool enableAdvancedColor(const std::string& gdiName) {
         set.header.size = sizeof(set);
         set.header.adapterId = paths[i].targetInfo.adapterId;
         set.header.id = paths[i].targetInfo.id;
-        set.enableAdvancedColor = TRUE;
+        set.enableAdvancedColor = enable ? TRUE : FALSE;
         return DisplayConfigSetDeviceInfo(&set.header) == ERROR_SUCCESS;
     }
     return false;
@@ -429,8 +437,9 @@ bool adbWaitForDevice(const std::string& adb) {
     return false;
 }
 
-// Minimum receiver versionCode this sender needs (touch protocol v2 arrived in 3).
-constexpr int kRequiredAppVersion = 7;
+// Minimum receiver versionCode this sender needs. v8 moved touch capture to the
+// Activity's dispatchTouchEvent (the SurfaceView OnTouchListener never fired).
+constexpr int kRequiredAppVersion = 8;
 
 void adbEnsureAppInstalled(const std::string& adb, const std::string& exeDir) {
     bool needInstall = true;
@@ -1615,13 +1624,20 @@ int main(int argc, char** argv) {
                   << ", output " << selected->outputIndex << ")\n";
 
         if (options.hdr) {
-            if (enableAdvancedColor(selected->name)) {
+            if (setAdvancedColor(selected->name, true)) {
                 std::cout << "HDR enabled on the virtual display.\n";
                 Sleep(1500);  // let the framebuffer switch to 10-bit before capture
             } else {
                 std::cout << "Could not enable HDR automatically. Turn on "
                              "Settings > Display > Use HDR for the tablet display, "
                              "or run without --hdr.\n";
+            }
+        } else {
+            // SDR path: make sure Windows HDR is OFF on the virtual display, else
+            // the SDR capture of an HDR framebuffer looks washed-out / over-bright.
+            if (setAdvancedColor(selected->name, false)) {
+                std::cout << "Virtual display set to SDR (correct desktop colors).\n";
+                Sleep(800);  // let the framebuffer switch back to 8-bit before capture
             }
         }
 

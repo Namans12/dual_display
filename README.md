@@ -6,11 +6,15 @@ Built and verified on a Samsung Galaxy Tab S9 Ultra (2960×1848) + Windows 11.
 
 ## For Users — Windows
 
-1. Run **`ExtendedDisplaySetup.exe`**, keeping the **virtual display driver** option ticked.
-2. On the tablet: enable Developer Options → USB debugging (only needed for the USB path).
-3. Double-click the **Extended Display** shortcut.
+**📖 Full step-by-step guide: [INSTALL.md](INSTALL.md)** (new-device setup, manual driver steps, packaging, troubleshooting).
 
-It figures out the rest: finds (or creates) the extended display, locates the tablet **over USB or Wi-Fi automatically**, installs/launches the app on it, picks the best encoder for your GPU, and starts streaming. Unplug/replug or drop Wi-Fi and it reconnects.
+Quick version — from the portable ZIP (`ExtendedDisplay-0.7.1-win64.zip`) or the installer:
+
+1. **Install the virtual display driver once:** right-click **`Install-Driver.bat`** → Run as administrator, then **reboot once**. (Or run `ExtendedDisplaySetup.exe` with the driver option ticked.)
+2. On the tablet: enable Developer Options → USB debugging (USB path), or sideload `ExtendedDisplayReceiver.apk` (Wi-Fi path).
+3. Double-click **`ExtendedDisplay.exe`** — the settings GUI. Pick USB/Wi-Fi, codec, HDR, touch, then **Start Streaming**. **Stop** cleanly removes the virtual display.
+
+The GUI just drives `ExtendedDisplaySender.exe`, which you can also run directly:
 
 ```powershell
 ExtendedDisplaySender.exe              # auto: USB if plugged, else Wi-Fi
@@ -58,6 +62,7 @@ The virtual display exists **only while streaming**: the sender extends onto it 
 ```text
 windows-sender/     C++ host: display discovery, VDD topology, USB/Wi-Fi
                     transport, encoder ladder, ffmpeg supervision, touch inject
+windows-sender/launcher/  C# WinForms settings GUI (ExtendedDisplay.exe)
 android-receiver/   Kotlin app: MediaCodec decode, TCP/UDP receive, touch uplink
 mac-host/           macOS host (ScreenCaptureKit + VideoToolbox)
 installers/windows/ Inno Setup installer + payload/VDD-install scripts
@@ -75,7 +80,8 @@ See [docs/build.md](docs/build.md) for building each component and the full CLI,
 - **"No extended display available" (exit 2)** — re-run the installer with the driver option ticked; see [docs/extended-display.md](docs/extended-display.md).
 - **"falling back to..."** — normal; the encoder ladder is finding what your GPU supports.
 - **Soft/blurry text** — raise `--bitrate` (default 25000).
-- **HDR washed out / unavailable** — needs Windows 11 23H2+ and HEVC; `--hdr` auto-enables Windows HDR on the virtual display.
+- **Washed out / over-bright** — the SDR path auto-disables Windows HDR on the virtual display for correct colours; only pass `--hdr` for real HDR content.
+- **Touch does nothing** — use the bundled app (v8+); tap directly on windows/icons on the tablet (touch ≠ mouse cursor).
 - **ddagrab errors** — needs Windows 10 1903+ and a full GPL FFmpeg (the installer bundles one).
 
 ## Roadmap (not yet built)
