@@ -12,6 +12,11 @@ Improvements (Wi-Fi robustness + usability).
   [Fixes.md](Fixes.md).)
 - **Manual tablet IP** in the GUI (and `--host` on the CLI) for networks that
   block the discovery broadcast (AP isolation, guest Wi-Fi). Empty = auto-discover.
+- **Live status line** in the GUI — the sender emits ffmpeg `-stats`, and the GUI
+  captures its output to show connection state + live fps
+  (`Streaming • Wi-Fi UDP • 59 fps`, `Reconnecting…`, `Searching for tablet…`).
+  (End-to-end latency isn't shown — it needs the receiver→sender feedback channel
+  noted in [Fixes.md](Fixes.md).)
 
 ## v0.7.2
 

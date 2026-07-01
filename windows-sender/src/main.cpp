@@ -659,7 +659,9 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
     const bool isHevc = options.hevc;
     std::ostringstream cmd;
     cmd << quote(ffmpeg)
-        << " -hide_banner -loglevel warning"
+        // -stats emits a periodic "frame=.. fps=.. bitrate=.." line on stderr
+        // (separate from the NAL stdout pipe) so the GUI can show live throughput.
+        << " -hide_banner -loglevel warning -stats -stats_period 1"
         << " -init_hw_device d3d11va=dx:" << display.adapterIndex
         << " -filter_hw_device dx"
         << " -filter_complex " << quote(graph)

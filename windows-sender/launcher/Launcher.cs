@@ -11,6 +11,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace ExtendedDisplay
@@ -38,6 +39,9 @@ namespace ExtendedDisplay
         Label lblStatus;
         Process sender;
         string exePath;
+        string liveFps = "";
+        string liveState = "";
+        string liveMode = "";
 
         public MainForm()
         {
@@ -200,14 +204,30 @@ namespace ExtendedDisplay
 
             try
             {
-                var psi = new ProcessStartInfo { FileName = exePath, Arguments = sb.ToString(), UseShellExecute = true };
+                liveFps = ""; liveState = "Starting";
+                liveMode = rbWifi.Checked ? (chkUdp.Checked ? "Wi-Fi UDP" : "Wi-Fi") : "USB";
+                var psi = new ProcessStartInfo
+                {
+                    FileName = exePath,
+                    Arguments = sb.ToString(),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
                 sender = Process.Start(psi);
                 sender.EnableRaisingEvents = true;
+                // The sender's own messages (stdout) and ffmpeg's -stats (stderr)
+                // both flow here; we parse them for a live status line.
+                sender.OutputDataReceived += (s2, ev) => { if (ev.Data != null) OnSenderLine(ev.Data); };
+                sender.ErrorDataReceived  += (s2, ev) => { if (ev.Data != null) OnSenderLine(ev.Data); };
+                sender.BeginOutputReadLine();
+                sender.BeginErrorReadLine();
                 sender.Exited += (s2, e2) => BeginInvoke((Action)(() =>
                 {
                     if (btnStop.Enabled) { SetStatus("Sender exited.", Color.DimGray); btnStart.Enabled = true; btnStop.Enabled = false; }
                 }));
-                SetStatus("Streaming...  (PID " + sender.Id + ")", Color.Green);
+                SetStatus("Starting…  (" + liveMode + ")", Color.Green);
                 btnStop.Enabled = true;
             }
             catch (Exception ex)
@@ -218,10 +238,48 @@ namespace ExtendedDisplay
             }
         }
 
+        // Parse a line from the sender / ffmpeg into a live status. ffmpeg's -stats
+        // gives "fps=NN"; the sender's own messages give the connection state.
+        void OnSenderLine(string line)
+        {
+            var m = Regex.Match(line, @"fps=\s*([\d.]+)");
+            if (m.Success && m.Groups[1].Value != "0" && m.Groups[1].Value != "0.0")
+                liveFps = m.Groups[1].Value;
+
+            if (Regex.IsMatch(line, "Reconnecting|Stream ended", RegexOptions.IgnoreCase))
+                { liveState = "Reconnecting"; liveFps = ""; }
+            else if (Regex.IsMatch(line, "Searching|No tablet found", RegexOptions.IgnoreCase))
+                liveState = "Searching";
+            else if (Regex.IsMatch(line, @"Streaming .*(over|with)|Tablet found|Tablet connected|Extended display:", RegexOptions.IgnoreCase))
+                liveState = "Streaming";
+
+            string text;
+            Color color;
+            switch (liveState)
+            {
+                case "Streaming":
+                    text = "Streaming  •  " + liveMode + (liveFps.Length > 0 ? "  •  " + liveFps + " fps" : "");
+                    color = Color.Green; break;
+                case "Reconnecting":
+                    text = "Reconnecting…  (" + liveMode + ")"; color = Color.DarkOrange; break;
+                case "Searching":
+                    text = "Searching for tablet…  (" + liveMode + ")"; color = Color.DarkOrange; break;
+                default:
+                    text = "Starting…  (" + liveMode + ")"; color = Color.DimGray; break;
+            }
+            try
+            {
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke((Action)(() => { if (btnStop.Enabled) SetStatus(text, color); }));
+            }
+            catch { }
+        }
+
         void StopSender()
         {
             try { if (sender != null && !sender.HasExited) { sender.Kill(); sender.WaitForExit(4000); } } catch { }
             sender = null;
+            liveState = ""; liveFps = "";
         }
 
         void OnStop(object sender2, EventArgs e)
