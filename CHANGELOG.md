@@ -1,6 +1,25 @@
 # Changelog
 
-## v0.7.1 — current
+## v0.7.2 — current
+
+Reliability fixes from continued field testing.
+
+- **Touch survives reconnects.** The receiver's touch server held one connection
+  and only noticed it was dead when it next tried to *write* — so after a Wi-Fi
+  blip or sender restart, the first reconnect silently lost touch until a tap
+  failed. Rewrote it "newest-connection-wins": a dedicated accept loop takes the
+  reconnecting host immediately and supersedes the stale socket. Receiver v9.
+- **Stop no longer risks real monitors.** Releasing the virtual display used
+  `SDC_TOPOLOGY_INTERNAL`, which forces the laptop panel and would drop a real
+  external monitor. The sender now deactivates *only* the VDD's CCD path
+  (`SDC_USE_SUPPLIED_DISPLAY_CONFIG`), and the GUI does a device-only disable —
+  both leave real monitors untouched. Non-elevated, so the CLI path works too.
+- **HDR marked experimental.** Capturing the (mostly SDR) Windows desktop with
+  HDR on reads as over-bright on the tablet — inherent to SDR-in-HDR, not a
+  pipeline bug. SDR stays the default and is the recommended mode; `--hdr` /
+  the GUI HDR option are labelled experimental (useful only for HDR video).
+
+## v0.7.1
 
 Field-testing fixes on real hardware (Galaxy Tab S9 Ultra, wired USB).
 

@@ -3,7 +3,7 @@
 
 [Setup]
 AppName=Extended Display
-AppVersion=0.7.1
+AppVersion=0.7.2
 AppPublisher=HeySnap
 DefaultDirName={autopf}\Extended Display
 PrivilegesRequired=admin

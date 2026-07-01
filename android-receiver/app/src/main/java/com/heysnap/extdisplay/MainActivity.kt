@@ -20,6 +20,7 @@ import android.widget.TextView
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -591,40 +592,58 @@ private class DiscoveryResponder {
 private class TouchUplink {
     private val running = AtomicBoolean(false)
     private var server: ServerSocket? = null
+    @Volatile private var current: Socket? = null
     private val queue = LinkedBlockingQueue<ByteArray>(256)
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
-        thread(name = "touch-uplink") {
+
+        // Accept loop: the NEWEST host connection wins. When the host reconnects
+        // (Wi-Fi blip, sender restart) it is accepted immediately and supersedes
+        // the stale socket — we never wait for the old, possibly half-open socket
+        // to be noticed dead (which previously required a touch to trigger a write
+        // failure, so the first reconnect silently lost touch).
+        thread(name = "touch-accept") {
             while (running.get()) {
                 try {
-                    server = ServerSocket().apply {
+                    val s = ServerSocket().apply {
                         reuseAddress = true
                         bind(InetSocketAddress(TOUCH_PORT))
                     }
+                    server = s
                     Log.i(TAG, "TouchUplink listening on $TOUCH_PORT")
-                    server!!.accept().use { socket ->
-                        socket.tcpNoDelay = true
+                    while (running.get()) {
+                        val sock = s.accept()
+                        sock.tcpNoDelay = true
+                        try { sock.keepAlive = true } catch (_: Exception) {}
+                        Log.i(TAG, "TouchUplink client connected: ${sock.inetAddress}")
+                        val old = current
+                        current = sock
                         queue.clear()
-                        val out = socket.getOutputStream()
-                        Log.i(TAG, "TouchUplink client connected: ${socket.inetAddress}")
-                        var sent = 0
-                        while (running.get()) {
-                            val packet = queue.poll(500, TimeUnit.MILLISECONDS) ?: continue
-                            out.write(packet)
-                            out.flush()
-                            if (sent == 0) Log.i(TAG, "TouchUplink sent first packet")
-                            sent++
-                        }
+                        if (old != null) try { old.close() } catch (_: Exception) {}
                     }
                 } catch (_: Exception) {
-                    if (running.get()) Thread.sleep(500)
+                    if (running.get()) Thread.sleep(300)
                 } finally {
-                    try {
-                        server?.close()
-                    } catch (_: Exception) {
-                    }
+                    try { server?.close() } catch (_: Exception) {}
                     server = null
+                }
+            }
+        }
+
+        // Writer loop: drain the queue to whatever the current socket is. A write
+        // failure just drops that socket; the accept loop supplies the next one.
+        thread(name = "touch-writer") {
+            while (running.get()) {
+                val packet = queue.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                val sock = current ?: continue
+                try {
+                    val out = sock.getOutputStream()
+                    out.write(packet)
+                    out.flush()
+                } catch (_: Exception) {
+                    try { sock.close() } catch (_: Exception) {}
+                    if (current === sock) current = null
                 }
             }
         }
@@ -632,10 +651,8 @@ private class TouchUplink {
 
     fun stop() {
         running.set(false)
-        try {
-            server?.close()
-        } catch (_: Exception) {
-        }
+        try { server?.close() } catch (_: Exception) {}
+        try { current?.close() } catch (_: Exception) {}
     }
 
     fun send(

@@ -14,7 +14,7 @@ This guide has three parts:
 
 ## What's in the package
 
-The distributable (`ExtendedDisplay-0.7.1-win64.zip`) contains everything — no
+The distributable (`ExtendedDisplay-0.7.2-win64.zip`) contains everything — no
 runtimes to install:
 
 | File | Purpose |
@@ -200,7 +200,7 @@ Then either:
 
 - **Portable ZIP** (no extra tools): stage `payload\*` plus `install-vdd.ps1`,
   `uninstall-vdd.ps1`, `Install-Driver.bat`, `QUICKSTART.txt` into a folder and zip
-  it. (This is what `dist\ExtendedDisplay-0.7.1-win64.zip` is.)
+  it. (This is what `dist\ExtendedDisplay-0.7.2-win64.zip` is.)
 - **`.exe` installer** (needs [Inno Setup 6](https://jrsoftware.org/isdl.php)):
   ```powershell
   & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss

@@ -8,7 +8,7 @@ Built and verified on a Samsung Galaxy Tab S9 Ultra (2960×1848) + Windows 11.
 
 **📖 Full step-by-step guide: [INSTALL.md](INSTALL.md)** (new-device setup, manual driver steps, packaging, troubleshooting).
 
-Quick version — from the portable ZIP (`ExtendedDisplay-0.7.1-win64.zip`) or the installer:
+Quick version — from the portable ZIP (`ExtendedDisplay-0.7.2-win64.zip`) or the installer:
 
 1. **Install the virtual display driver once:** right-click **`Install-Driver.bat`** → Run as administrator, then **reboot once**. (Or run `ExtendedDisplaySetup.exe` with the driver option ticked.)
 2. On the tablet: enable Developer Options → USB debugging (USB path), or sideload `ExtendedDisplayReceiver.apk` (Wi-Fi path).

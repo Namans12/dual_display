@@ -74,7 +74,7 @@ namespace ExtendedDisplay
             var grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(356, 104) };
             chkTouch = new CheckBox { Text = "Touch input  (tablet controls PC)", Location = new Point(12, 22), AutoSize = true, Checked = true };
             chkHevc = new CheckBox { Text = "HEVC / H.265  (better at high FPS)", Location = new Point(12, 48), AutoSize = true };
-            chkHdr = new CheckBox { Text = "HDR  (enable Windows HDR first)", Location = new Point(12, 74), AutoSize = true };
+            chkHdr = new CheckBox { Text = "HDR  (experimental - HDR video only; desktop looks washed)", Location = new Point(12, 74), AutoSize = true };
             grpOpt.Controls.AddRange(new Control[] { chkTouch, chkHevc, chkHdr });
 
             // ── Status + buttons ──────────────────────────────────────────
@@ -144,8 +144,9 @@ namespace ExtendedDisplay
 
         void DisableVdd()
         {
-            Native.SetDisplayConfig(0, IntPtr.Zero, 0, IntPtr.Zero, Native.SDC_APPLY | Native.SDC_TOPOLOGY_INTERNAL);
-            System.Threading.Thread.Sleep(800);
+            // Device-only disable removes just the VDD; real external monitors are
+            // untouched. (A SDC_TOPOLOGY_INTERNAL collapse would force the laptop
+            // panel and drop any real second monitor.)
             DisableVddDevice();
         }
 

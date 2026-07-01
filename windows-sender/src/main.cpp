@@ -18,7 +18,6 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <dxgi.h>
-#include <cfgmgr32.h>
 
 #include <atomic>
 #include <cstdlib>
@@ -315,15 +314,55 @@ std::optional<DisplayInfo> pickExtendedDisplay(const std::vector<DisplayInfo>& d
 // SDC_SAVE_TO_DATABASE/SDC_ALLOW_CHANGES (returns ERROR_INVALID_PARAMETER).
 std::atomic<bool> g_vddExtended{false};
 
+// Deactivates ONLY the virtual display's CCD path, leaving every real monitor
+// active. This is the safe way to release the VDD: SDC_TOPOLOGY_INTERNAL forces
+// the laptop's internal panel and would drop any real external monitor the user
+// has attached. Non-elevated (a path change needs no admin), so it also works
+// when the sender is run directly from the CLI.
+bool detachVirtualDisplay() {
+    UINT32 numPath = 0, numMode = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &numPath, &numMode) != ERROR_SUCCESS) {
+        return false;
+    }
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(numPath);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(numMode);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &numPath, paths.data(),
+                           &numMode, modes.data(), nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    bool found = false;
+    for (UINT32 i = 0; i < numPath; ++i) {
+        DISPLAYCONFIG_TARGET_DEVICE_NAME tgt{};
+        tgt.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        tgt.header.size = sizeof(tgt);
+        tgt.header.adapterId = paths[i].targetInfo.adapterId;
+        tgt.header.id = paths[i].targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&tgt.header) != ERROR_SUCCESS) continue;
+        // The VirtualDrivers VDD monitor reports hardware id "MTT1337" in its
+        // device path and "VDD" in its friendly name.
+        const std::wstring devPath = tgt.monitorDevicePath;
+        const std::wstring friendly = tgt.monitorFriendlyDeviceName;
+        if (devPath.find(L"MTT1337") != std::wstring::npos ||
+            friendly.find(L"VDD") != std::wstring::npos) {
+            paths[i].flags &= ~DISPLAYCONFIG_PATH_ACTIVE;  // detach only this path
+            found = true;
+        }
+    }
+    if (!found) return false;
+    return SetDisplayConfig(numPath, paths.data(), numMode, modes.data(),
+                            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG |
+                            SDC_ALLOW_CHANGES) == ERROR_SUCCESS;
+}
+
 void collapseToInternal() {
     if (g_vddExtended.exchange(false)) {
-        SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_INTERNAL);
-        // Disable the VDD device node so it doesn't linger as a ghost monitor
-        // in Display Settings after streaming ends.
-        DEVINST devInst = 0;
-        if (CM_Locate_DevNodeA(&devInst, const_cast<char*>("ROOT\\DISPLAY\\0000"), CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS)
-            CM_Disable_DevNode(devInst, CM_DISABLE_UI_NOT_OK);
-        std::cout << "Virtual display released (desktop back to primary only).\n";
+        // Detach only the VDD (keeps real external monitors). Fall back to
+        // internal-only if the VDD path can't be located for some reason.
+        if (!detachVirtualDisplay()) {
+            SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_INTERNAL);
+        }
+        std::cout << "Virtual display released.\n";
     }
 }
 
@@ -438,8 +477,9 @@ bool adbWaitForDevice(const std::string& adb) {
 }
 
 // Minimum receiver versionCode this sender needs. v8 moved touch capture to the
-// Activity's dispatchTouchEvent (the SurfaceView OnTouchListener never fired).
-constexpr int kRequiredAppVersion = 8;
+// Activity's dispatchTouchEvent (the SurfaceView OnTouchListener never fired);
+// v9 made the touch server re-accept a reconnecting host immediately.
+constexpr int kRequiredAppVersion = 9;
 
 void adbEnsureAppInstalled(const std::string& adb, const std::string& exeDir) {
     bool needInstall = true;
