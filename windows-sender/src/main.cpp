@@ -18,7 +18,9 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <dxgi.h>
+#include <bcrypt.h>
 
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -46,6 +48,105 @@ constexpr int kUdpHeaderSize = 12;
 
 std::atomic<bool> g_stop{false};
 std::atomic<HANDLE> g_child{nullptr};
+
+// ------------------------------------------------------------- crypto (BCrypt)
+// PBKDF2-HMAC-SHA256 key derivation + AES-256-GCM, via Windows BCrypt (no third-
+// party crypto). Wire frame per message: [12B nonce][ciphertext][16B tag].
+// See SECURITY.md for the pairing/threat-model design.
+constexpr int kGcmNonceLen = 12;
+constexpr int kGcmTagLen = 16;
+constexpr int kKeyLen = 32;
+
+// Derive a 32-byte key from the pairing code (same salt/iterations as the app).
+bool deriveKey(const std::string& code, std::array<uint8_t, kKeyLen>& outKey) {
+    static const char kSalt[] = "ExtDisplay/v1";
+    BCRYPT_ALG_HANDLE hPrf = nullptr;
+    if (BCryptOpenAlgorithmProvider(&hPrf, BCRYPT_SHA256_ALGORITHM, nullptr,
+                                    BCRYPT_ALG_HANDLE_HMAC_FLAG) != 0)
+        return false;
+    NTSTATUS st = BCryptDeriveKeyPBKDF2(
+        hPrf, reinterpret_cast<PUCHAR>(const_cast<char*>(code.data())),
+        static_cast<ULONG>(code.size()),
+        reinterpret_cast<PUCHAR>(const_cast<char*>(kSalt)), sizeof(kSalt) - 1,
+        200000, outKey.data(), kKeyLen, 0);
+    BCryptCloseAlgorithmProvider(hPrf, 0);
+    return st == 0;
+}
+
+// Reusable AES-256-GCM context (one per channel/direction; the key handle is kept
+// open so per-message encrypt/decrypt is cheap enough for the video path).
+class AesGcm {
+public:
+    bool init(const std::array<uint8_t, kKeyLen>& key) {
+        if (BCryptOpenAlgorithmProvider(&hAlg_, BCRYPT_AES_ALGORITHM, nullptr, 0) != 0) return false;
+        if (BCryptSetProperty(hAlg_, BCRYPT_CHAINING_MODE,
+                reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_GCM)),
+                sizeof(BCRYPT_CHAIN_MODE_GCM), 0) != 0) return false;
+        return BCryptGenerateSymmetricKey(hAlg_, &hKey_, nullptr, 0,
+                reinterpret_cast<PUCHAR>(const_cast<uint8_t*>(key.data())), kKeyLen, 0) == 0;
+    }
+    ~AesGcm() {
+        if (hKey_) BCryptDestroyKey(hKey_);
+        if (hAlg_) BCryptCloseAlgorithmProvider(hAlg_, 0);
+    }
+    // out = [nonce][ciphertext][tag]
+    bool encrypt(const uint8_t* pt, int ptLen, const uint8_t nonce[kGcmNonceLen],
+                 std::vector<uint8_t>& out) {
+        out.resize(kGcmNonceLen + ptLen + kGcmTagLen);
+        std::memcpy(out.data(), nonce, kGcmNonceLen);
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+        BCRYPT_INIT_AUTH_MODE_INFO(info);
+        info.pbNonce = const_cast<PUCHAR>(nonce); info.cbNonce = kGcmNonceLen;
+        info.pbTag = out.data() + kGcmNonceLen + ptLen; info.cbTag = kGcmTagLen;
+        ULONG res = 0;
+        return BCryptEncrypt(hKey_, const_cast<PUCHAR>(pt), ptLen, &info, nullptr, 0,
+                             out.data() + kGcmNonceLen, ptLen, &res, 0) == 0;
+    }
+    // in = [nonce][ciphertext][tag]; fails (returns false) on auth mismatch.
+    bool decrypt(const uint8_t* in, int inLen, std::vector<uint8_t>& out) {
+        if (inLen < kGcmNonceLen + kGcmTagLen) return false;
+        int ctLen = inLen - kGcmNonceLen - kGcmTagLen;
+        out.resize(ctLen);
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+        BCRYPT_INIT_AUTH_MODE_INFO(info);
+        info.pbNonce = const_cast<PUCHAR>(in); info.cbNonce = kGcmNonceLen;
+        info.pbTag = const_cast<PUCHAR>(in) + kGcmNonceLen + ctLen; info.cbTag = kGcmTagLen;
+        ULONG res = 0;
+        return BCryptDecrypt(hKey_, const_cast<PUCHAR>(in) + kGcmNonceLen, ctLen, &info,
+                             nullptr, 0, out.data(), ctLen, &res, 0) == 0;
+    }
+private:
+    BCRYPT_ALG_HANDLE hAlg_ = nullptr;
+    BCRYPT_KEY_HANDLE hKey_ = nullptr;
+};
+
+// Round-trips the crypto so a regression is caught at build/smoke-test time.
+int cryptoSelfTest() {
+    std::array<uint8_t, kKeyLen> k1{}, k2{}, kWrong{};
+    if (!deriveKey("TESTCODE", k1) || !deriveKey("TESTCODE", k2) || !deriveKey("WRONGXXX", kWrong)) {
+        std::cout << "crypto self-test: KDF FAILED\n"; return 1;
+    }
+    if (k1 != k2) { std::cout << "crypto self-test: KDF not deterministic\n"; return 1; }
+    AesGcm enc, dec, decBad;
+    if (!enc.init(k1) || !dec.init(k2) || !decBad.init(kWrong)) {
+        std::cout << "crypto self-test: AES init FAILED\n"; return 1;
+    }
+    const char* msg = "hello extended display touch+video payload 12345";
+    uint8_t nonce[kGcmNonceLen] = {1,2,3,4,5,6,7,8,9,10,11,12};
+    std::vector<uint8_t> ct, pt, ptBad;
+    if (!enc.encrypt(reinterpret_cast<const uint8_t*>(msg), (int)std::strlen(msg), nonce, ct)) {
+        std::cout << "crypto self-test: encrypt FAILED\n"; return 1;
+    }
+    if (!dec.decrypt(ct.data(), (int)ct.size(), pt) ||
+        std::string(pt.begin(), pt.end()) != msg) {
+        std::cout << "crypto self-test: round-trip FAILED\n"; return 1;
+    }
+    if (decBad.decrypt(ct.data(), (int)ct.size(), ptBad)) {
+        std::cout << "crypto self-test: wrong key DECRYPTED (must be rejected)\n"; return 1;
+    }
+    std::cout << "crypto self-test: OK (KDF deterministic, GCM round-trip, wrong key rejected)\n";
+    return 0;
+}
 
 struct Options {
     int port = 5000;          // local forward port
@@ -1587,6 +1688,10 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Crypto smoke test (used in CI/dev): verify KDF + AES-GCM before shipping.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--crypto-selftest") return cryptoSelfTest();
+    }
     // Without DPI awareness, DesktopCoordinates come back scaled (e.g. a
     // 2560x1600 panel at 150% reports 1536x960) and we'd encode at the wrong size.
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);

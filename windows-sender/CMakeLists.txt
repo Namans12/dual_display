@@ -7,7 +7,7 @@ add_executable(ExtendedDisplaySender
 )
 
 target_compile_features(ExtendedDisplaySender PRIVATE cxx_std_20)
-target_link_libraries(ExtendedDisplaySender PRIVATE dxgi ws2_32 iphlpapi)
+target_link_libraries(ExtendedDisplaySender PRIVATE dxgi ws2_32 iphlpapi bcrypt)
 
 if (MSVC)
     target_compile_options(ExtendedDisplaySender PRIVATE /W4 /permissive-)
