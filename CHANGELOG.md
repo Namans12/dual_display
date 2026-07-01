@@ -14,10 +14,15 @@ Reliability fixes from continued field testing.
   external monitor. The sender now deactivates *only* the VDD's CCD path
   (`SDC_USE_SUPPLIED_DISPLAY_CONFIG`), and the GUI does a device-only disable —
   both leave real monitors untouched. Non-elevated, so the CLI path works too.
-- **HDR marked experimental.** Capturing the (mostly SDR) Windows desktop with
-  HDR on reads as over-bright on the tablet — inherent to SDR-in-HDR, not a
-  pipeline bug. SDR stays the default and is the recommended mode; `--hdr` /
-  the GUI HDR option are labelled experimental (useful only for HDR video).
+- **HDR: real colour-conversion fix, but kept experimental.** The `--hdr` path
+  was *re-tagging* the captured frames as PQ without converting them, so the
+  tablet PQ-decoded sRGB values and blew out ("extra bright"). It now genuinely
+  converts sRGB/BT.709 → PQ/BT.2020 via `zscale` (SDR white → 100 nits). However,
+  the VDD framebuffer is measurably **SDR** (ddagrab tags it bt709/sRGB even with
+  HDR on), so there is no real HDR content to deliver and it can't look
+  "calibrated". SDR stays the default/recommended mode; `--hdr` and the GUI HDR
+  option remain **experimental** (for genuine HDR video only). Full write-up in
+  [Fixes.md](Fixes.md).
 
 ## v0.7.1
 

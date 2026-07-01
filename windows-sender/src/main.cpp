@@ -639,8 +639,13 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
         graph += scaled ? (",scale_cuda=" + widthStr + ":" + heightStr + ":format=nv12")
                         : ",scale_cuda=format=nv12";
     } else if (options.hdr) {
-        // HDR surface is 10-bit RGB; download as x2bgr10le, then convert to p010.
-        graph += ",hwdownload,format=x2bgr10le,format=p010le";
+        // ddagrab captures the VDD's HDR framebuffer as 10-bit sRGB/BT.709 (that's
+        // where Windows composites the desktop). It must be COLOR-CONVERTED to
+        // PQ/BT.2020 — merely re-tagging it as smpte2084 makes the tablet PQ-decode
+        // sRGB values and blow the picture out ("extra bright"). zscale does the
+        // real conversion; npl=100 maps SDR reference white to 100 nits.
+        graph += ",hwdownload,format=x2bgr10le,"
+                 "zscale=p=bt2020:t=smpte2084:m=bt2020nc:r=tv:npl=100,format=p010le";
         if (scaled) {
             graph += ",scale=" + widthStr + ":" + heightStr + ":flags=lanczos";
         }
