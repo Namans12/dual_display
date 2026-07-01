@@ -33,7 +33,7 @@ namespace ExtendedDisplay
         RadioButton rbUsb, rbWifi;
         CheckBox chkUdp, chkTouch, chkHevc, chkHdr;
         ComboBox cmbFps, cmbEnc;
-        TextBox txtBit;
+        TextBox txtBit, txtIp;
         Button btnStart, btnStop;
         Label lblStatus;
         Process sender;
@@ -53,10 +53,14 @@ namespace ExtendedDisplay
             // ── Connection ────────────────────────────────────────────────
             var grpConn = new GroupBox { Text = "Connection", Location = new Point(12, 10), Size = new Size(356, 96) };
             rbUsb = new RadioButton { Text = "USB  (auto-detect via adb)", Location = new Point(12, 22), AutoSize = true, Checked = true };
-            rbWifi = new RadioButton { Text = "Wi-Fi  (discover on LAN)", Location = new Point(12, 46), AutoSize = true };
+            rbWifi = new RadioButton { Text = "Wi-Fi", Location = new Point(12, 46), AutoSize = true };
+            // Manual tablet IP for networks that block the discovery broadcast
+            // (AP isolation, guest networks). Empty = auto-discover on the LAN.
+            var lblIp = new Label { Text = "IP (optional):", Location = new Point(78, 48), AutoSize = true };
+            txtIp = new TextBox { Location = new Point(162, 45), Width = 120, Enabled = false, Text = "" };
             chkUdp = new CheckBox { Text = "Low-latency UDP  (Wi-Fi only)", Location = new Point(30, 70), AutoSize = true, Enabled = false };
-            rbWifi.CheckedChanged += (s, e) => chkUdp.Enabled = rbWifi.Checked;
-            grpConn.Controls.AddRange(new Control[] { rbUsb, rbWifi, chkUdp });
+            rbWifi.CheckedChanged += (s, e) => { chkUdp.Enabled = rbWifi.Checked; txtIp.Enabled = rbWifi.Checked; };
+            grpConn.Controls.AddRange(new Control[] { rbUsb, rbWifi, lblIp, txtIp, chkUdp });
 
             // ── Video ─────────────────────────────────────────────────────
             var grpVid = new GroupBox { Text = "Video", Location = new Point(12, 114), Size = new Size(356, 100) };
@@ -177,7 +181,14 @@ namespace ExtendedDisplay
             EnableVdd();
 
             var sb = new System.Text.StringBuilder();
-            if (rbWifi.Checked) sb.Append(" --wifi");
+            if (rbWifi.Checked)
+            {
+                string ip = txtIp.Text.Trim();
+                // A manual IP connects directly (skips discovery broadcast); empty
+                // falls back to auto-discovery on the LAN.
+                if (ip.Length > 0) sb.Append(" --host " + ip);
+                else sb.Append(" --wifi");
+            }
             if (chkUdp.Checked && chkUdp.Enabled) sb.Append(" --udp");
             if (chkHdr.Checked) sb.Append(" --hdr");
             else if (chkHevc.Checked) sb.Append(" --hevc");

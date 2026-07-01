@@ -671,6 +671,11 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
         cmd << " -preset p1 -tune ull -rc cbr"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
             << " -zerolatency 1 -delay 0 -bf 0 -g " << options.fps;
+        // UDP is lossy: rolling intra-refresh spreads intra blocks across the GOP
+        // so a dropped packet self-heals within one refresh cycle instead of
+        // freezing/corrupting until the next full keyframe. No scene-cut IDRs
+        // (which would spike the bitrate and stall a Wi-Fi link).
+        if (options.udp) cmd << " -intra-refresh 1 -no-scenecut 1";
         if (options.hdr) cmd << " -profile:v main10";
     } else if (attempt.encoder.rfind("h264_qsv", 0) == 0 ||
                attempt.encoder.rfind("hevc_qsv", 0) == 0) {
@@ -692,6 +697,10 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
         cmd << " -preset ultrafast -tune zerolatency"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
             << " -bf 0 -g " << options.fps;
+        // UDP loss resilience via periodic intra-refresh (see nvenc note above).
+        if (options.udp && attempt.encoder.rfind("libx264", 0) == 0) {
+            cmd << " -x264opts intra-refresh=1:no-scenecut=1";
+        }
         if (options.hdr) cmd << " -profile:v main10";
     }
 

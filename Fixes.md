@@ -5,6 +5,34 @@ A log of non-obvious fixes and dead-ends, for future reference. Complements
 
 ---
 
+## Wi-Fi loss resilience — intra-refresh, not adaptive-bitrate/FEC (by design)
+
+**Goal:** reduce Wi-Fi jank/lag (2.4 GHz / 300 Mbps link) where UDP packet loss
+corrupts the picture.
+
+**What was implemented:** rolling **intra-refresh** on the UDP path (nvenc
+`-intra-refresh 1 -no-scenecut 1`; libx264 `intra-refresh=1:no-scenecut=1`). This
+spreads intra-coded blocks across the GOP so a dropped packet self-heals within
+one refresh cycle instead of freezing/corrupting until the next full keyframe — and
+avoids the bitrate spike a keyframe would cause on a congested link. Verified: the
+tablet decodes the intra-refresh stream with no decoder errors. TCP path keeps
+normal keyframes (it's reliable, doesn't need this).
+
+**What was NOT implemented, and why:** the original wish-list was *adaptive bitrate
++ FEC + on-demand keyframes*. All three need a **control/feedback channel** from
+the tablet back to the sender AND runtime control of the encoder, which the current
+**ffmpeg-CLI** architecture can't do (you can't change bitrate or force an IDR mid-
+stream via the CLI). Doing them properly means driving libavcodec directly (or a
+pipe-control protocol) + a receiver→sender RTT/loss report. That's a sizeable
+rearchitecture. Intra-refresh delivers most of the real-world robustness benefit
+without any of that, so it was the right first step.
+  - If revisited: add a small UDP/TCP feedback message (seq gaps, RTT) from the
+    receiver; move encoding to libavcodec so bitrate is reconfigurable and IDRs can
+    be forced on a loss report; optionally add XOR/Reed-Solomon FEC in the UDP
+    framing layer (`main.cpp` packetizer + `UdpReassembler`).
+
+---
+
 ## HDR on the virtual display — why it stays SDR (parked)
 
 **Status:** Parked. SDR is the mode; `--hdr` / the GUI HDR option are experimental.

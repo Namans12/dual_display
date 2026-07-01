@@ -1,6 +1,19 @@
 # Changelog
 
-## v0.7.2 — current
+## v0.8.0 — in progress
+
+Improvements (Wi-Fi robustness + usability).
+
+- **Wi-Fi loss resilience:** the UDP path now uses rolling **intra-refresh**
+  (nvenc/x264) so a dropped packet self-heals within a refresh cycle instead of
+  freezing until the next keyframe — no keyframe bitrate spikes on a congested
+  link. Verified decoding cleanly on the tablet. (Full adaptive-bitrate/FEC/
+  on-demand-keyframes need a feedback channel + library encoder — see
+  [Fixes.md](Fixes.md).)
+- **Manual tablet IP** in the GUI (and `--host` on the CLI) for networks that
+  block the discovery broadcast (AP isolation, guest Wi-Fi). Empty = auto-discover.
+
+## v0.7.2
 
 Reliability fixes from continued field testing.
 
