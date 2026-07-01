@@ -22,10 +22,12 @@ Improvements (Wi-Fi robustness + usability + security).
     video is decoding** — so with encryption off it no longer lingers/blocks the
     screen (previously it hung until a stop/reconnect). GUI code label trimmed to
     just "Pairing code:  XXXXXXXX".
-- **S Pen eraser:** the Samsung S Pen has no eraser tip — it reports its side button
-  as a button state, not `TOOL_TYPE_ERASER`, so erase never fired. The receiver now
-  maps "stylus + side button held" to the eraser tool (works in e.g. MS Whiteboard).
-  Pressure and hover already worked.
+- **S Pen:** pressure drawing and hover work (verified in MS Whiteboard/GoodNotes).
+  **Eraser is a known limitation** — the S Pen has no eraser tip, and its side button
+  is owned by Samsung Air Command at the system level (a press opens the S Pen panel),
+  so it can't serve as a reliable hold-to-erase modifier. We map a real eraser tip
+  (`TOOL_TYPE_ERASER`, e.g. a flipped Surface Pen) but deliberately don't map the S
+  Pen button (it only produced glitchy mixed strokes). See [Fixes.md](Fixes.md).
 
 - **Wi-Fi loss resilience:** the UDP path now uses rolling **intra-refresh**
   (nvenc/x264) so a dropped packet self-heals within a refresh cycle instead of

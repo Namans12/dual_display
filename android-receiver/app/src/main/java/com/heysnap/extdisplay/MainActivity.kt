@@ -316,13 +316,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun toolCode(event: MotionEvent, i: Int): Int = when (event.getToolType(i)) {
+        // A real eraser tip (e.g. Surface Pen flipped) erases. The Samsung S Pen has
+        // no eraser tip, and its side button is owned by Samsung Air Command at the
+        // system level (a press opens the side panel) — it is not a reliable
+        // hold-to-erase modifier, so we do NOT map it (that only caused glitchy
+        // mixed pen/eraser strokes). Pressure + hover + drawing all work.
         MotionEvent.TOOL_TYPE_ERASER -> 2
-        // The Samsung S Pen has no separate eraser tip — it reports its side button
-        // as a button state. Treat "button held" as erase so it works in apps like
-        // Microsoft Whiteboard.
-        MotionEvent.TOOL_TYPE_STYLUS ->
-            if (event.buttonState and
-                (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_SECONDARY) != 0) 2 else 1
+        MotionEvent.TOOL_TYPE_STYLUS -> 1
         else -> 0
     }
 

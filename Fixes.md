@@ -93,6 +93,24 @@ for the niche of streaming genuine HDR *video* fullscreen.
 
 ---
 
+## S Pen eraser — not feasible (Samsung Air Command owns the button)
+
+**Verified working:** S Pen pressure drawing and hover (MS Whiteboard, GoodNotes).
+
+**Eraser: parked.** The Samsung S Pen has no eraser tip (unlike a Surface Pen you
+flip). Its side button is the only candidate, but a diagnostic showed:
+- The app *does* receive the button as `buttonState=32` (`BUTTON_STYLUS_PRIMARY`)
+  with `toolType=2` (stylus) — so it's not invisible to us.
+- BUT the button is claimed by **Samsung Air Command** at the system level: a single
+  press opens the S Pen side panel, and it does not behave as a held modifier during
+  a stroke. Mapping "stylus + button" → eraser therefore didn't erase in Whiteboard
+  or GoodNotes (those decide pen-vs-eraser at stroke start), and risked glitchy mixed
+  strokes from stray button events.
+
+**Decision:** don't map the S Pen button. We still honour a real `TOOL_TYPE_ERASER`
+(e.g. a flipped Surface Pen). Revisiting would require the user to disable Air actions
+AND app-specific eraser handling — out of scope. (`MainActivity.kt` `toolCode`.)
+
 ## Touch never fired (receiver v8)
 
 `SurfaceView.setOnTouchListener` never received events on this device — even
