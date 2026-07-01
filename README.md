@@ -1,6 +1,6 @@
 # Extended Display
 
-Turn an Android tablet into a true **extended display** (not a mirror) for a Windows PC or Mac — at the tablet's **native resolution, 120 Hz, with HDR10**, over **USB or Wi-Fi**, with **touch and S Pen** control of the PC.
+Turn an Android tablet into a true **extended display** (not a mirror) for a Windows PC or Mac — at the tablet's **native resolution, 120 Hz, with HDR10**, over **USB or Wi-Fi**, with **touch and S Pen** control of the PC and optional **desktop audio**.
 
 Built and verified on a Samsung Galaxy Tab S9 Ultra (2960×1848) + Windows 11.
 
@@ -21,6 +21,7 @@ ExtendedDisplaySender.exe              # auto: USB if plugged, else Wi-Fi
 ExtendedDisplaySender.exe --hdr        # HDR10 (10-bit, auto-enables Windows HDR)
 ExtendedDisplaySender.exe --hevc       # H.265 (sharper at high resolution)
 ExtendedDisplaySender.exe --wifi --udp # wireless, low-latency UDP video
+ExtendedDisplaySender.exe --audio      # also play PC sound on the tablet
 ExtendedDisplaySender.exe --bitrate 40000   # crisper text
 ```
 
@@ -36,6 +37,8 @@ Build `ExtendedDisplay.dmg` on a Mac with [installers/mac/build-dmg.sh](installe
 | **Codecs** | H.264 + **HEVC** (HDR uses HEVC Main10). Encoder auto-ladder: NVENC → Intel QSV → AMD AMF → **Media Foundation** → x264/x265, so it works on any GPU. |
 | **Transport** | **USB** (adb) and **Wi-Fi** with zero-config discovery. Video over reliable TCP or low-latency **UDP**; touch always on reliable TCP. |
 | **Input** | Multi-touch, two-finger scroll/pinch, long-press right-click, and **S Pen** with pressure / hover / eraser → injected as real Windows touch + pen. |
+| **Audio** | Optional **desktop audio** (PC → tablet) via WASAPI loopback → the tablet's speakers. No extra driver; encrypted with the rest of the link when paired. |
+| **Security** | Optional **PIN pairing + AES-256-GCM** on every channel (video, touch, audio) for untrusted Wi-Fi — see [SECURITY.md](SECURITY.md). |
 
 ## How It Works
 
@@ -47,11 +50,13 @@ Build `ExtendedDisplay.dmg` on a Mac with [installers/mac/build-dmg.sh](installe
   │     ↓                                                        │
   │  TCP (tcp://tablet:5000)  or  UDP fragments (--udp)          │
   │     ↑ touch/S-Pen, always TCP 5001                           │
+  │     ↓ desktop audio (WASAPI loopback), TCP 5003 (--audio)    │
   └──── discovery: UDP broadcast 5002 ; lifecycle: CCD topology ─┘
                           ↕  USB (adb) or Wi-Fi
   ┌─ Android app ───────────────────────────────────────────────┐
   │  TCP splitter + UDP reassembler → MediaCodec → SurfaceView   │
-  │  touch/S-Pen uplink (protocol v2) ; mDNS-free discovery reply│
+  │  touch/S-Pen uplink (protocol v2) ; AudioTrack playback      │
+  │  mDNS-free discovery reply                                   │
   └─────────────────────────────────────────────────────────────┘
 ```
 

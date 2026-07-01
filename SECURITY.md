@@ -40,6 +40,9 @@ Goals: (a) only a **paired** tablet can connect/control, (b) the streams are
   - TCP: with encryption on, route ffmpeg → sender → encrypt → tablet (today ffmpeg
     connects to the tablet directly; encryption requires the sender to sit in the
     middle, like the UDP path already does).
+- **Audio (TCP 5003):** encrypt each captured PCM packet. Nonce prefix `0x02`
+  domain-separates audio from video (`0x01`) and touch (`0x00`). The 12-byte
+  format header (sample rate / channels) stays plaintext — it carries no secret.
 - Platform crypto only, no third-party deps: **Windows BCrypt** (PBKDF2 + AES-GCM)
   on the sender; **javax.crypto** (`PBKDF2WithHmacSHA256`, `AES/GCM/NoPadding`) on
   the receiver.
@@ -76,6 +79,11 @@ can't authenticate it, it reports "wrong pairing code" and disconnects.
    Verified on-device: correct code → video decodes at 2960×1848 on both TCP and
    UDP; wrong code → no video. Over USB the same encrypted TCP framing rides the
    adb link.
+   - **Audio channel** (v0.8.0) — the optional desktop-audio stream (TCP 5003) uses
+     the same per-packet AES-GCM framing, nonce prefix `0x02`. Verified on-device:
+     paired (correct code) → continuous decrypted playback with a stable connection
+     (a wrong key fails `open()` on the first frame and drops the link, same as the
+     other channels).
 4. **Polish** (todo) — "wrong code" UX in the GUI, remember pairing (store the
    derived key on the tablet so the code is entered once), optional toggle to run
    open on a trusted LAN.

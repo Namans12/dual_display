@@ -5,6 +5,32 @@ A log of non-obvious fixes and dead-ends, for future reference. Complements
 
 ---
 
+## Desktop audio — WASAPI loopback, raw PCM (not ffmpeg dshow / Opus)
+
+**Choice:** capture the default render endpoint with a **custom WASAPI loopback**
+client (`IAudioClient` + `AUDCLNT_STREAMFLAGS_LOOPBACK`) in the sender, convert the
+mix to 16-bit stereo, and send **raw PCM** length-prefixed to the tablet's
+`AudioTrack`. Encrypted per-packet (AES-GCM, nonce prefix `0x02`) when paired.
+
+**Why not the alternatives:**
+- *ffmpeg `-f dshow`/openal:* Windows has no built-in loopback capture device for
+  ffmpeg — it needs a virtual cable (VB-Audio, etc.), i.e. a driver install. The
+  whole project is "no extra drivers beyond the VDD," so a native `IAudioClient`
+  loopback is the right fit (nothing to install).
+- *Opus/AAC encode:* raw S16 stereo @48 kHz is only ~1.5 Mbps — trivial next to the
+  ~25 Mbps video on USB/5 GHz — and skipping a codec avoids encode/decode latency
+  and a dependency. If audio ever rides a constrained link, Opus is the upgrade.
+
+**A/V sync (tunable, not exact):** the `AudioTrack` is built with a short buffer
+(`minBuf * 2`) so audio doesn't lag the video by much, and `track.write()` blocks
+to pace capture. Audio and video are **independent streams** with no shared clock,
+so lip-sync is approximate (typically audio slightly ahead). Good enough for
+system sounds / video playback; tightening it would need PTS timestamps and a
+shared clock (a larger change). Silent passages: WASAPI returns no packets, so we
+send nothing and the tablet's buffer drains to silence (no click).
+
+---
+
 ## Wi-Fi loss resilience — intra-refresh, not adaptive-bitrate/FEC (by design)
 
 **Goal:** reduce Wi-Fi jank/lag (2.4 GHz / 300 Mbps link) where UDP packet loss

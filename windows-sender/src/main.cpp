@@ -19,6 +19,9 @@
 #include <shellapi.h>
 #include <dxgi.h>
 #include <bcrypt.h>
+#include <mmdeviceapi.h>   // WASAPI: IMMDeviceEnumerator (desktop-audio loopback)
+#include <audioclient.h>   // WASAPI: IAudioClient / IAudioCaptureClient
+#include <mmreg.h>         // WAVE_FORMAT_* tags for the mix format
 
 #include <array>
 #include <atomic>
@@ -37,6 +40,8 @@ namespace {
 constexpr int kRemotePort = 5000;       // video listener inside the Android app
 constexpr int kRemoteTouchPort = 5001;  // touch uplink listener inside the app
 constexpr int kDiscoveryPort = 5002;    // UDP discovery port on the tablet
+constexpr int kRemoteAudioPort = 5003;  // desktop-audio listener inside the app
+constexpr uint32_t kAudioMagic = 0x45584155;  // 'EXAU' (audio format header)
 constexpr ULONGLONG kProvenUptimeMs = 5000;
 
 // UDP video framing (low-latency Wi-Fi path). Each NAL unit is split into
@@ -168,6 +173,7 @@ struct Options {
     bool hdr = false;            // HDR10 (10-bit BT.2020 PQ); implies hevc
     bool wifi = false;           // discover the tablet over the LAN, skip adb
     bool udp = false;            // low-latency UDP video (needs --wifi or --host)
+    bool audio = false;          // stream desktop audio (WASAPI loopback) to the tablet
     bool listDisplays = false;
 };
 
@@ -1250,6 +1256,200 @@ void runTouchBridge(const std::string adb, const std::string host, int localPort
     WSACleanup();
 }
 
+// --------------------------------------------------------------- desktop audio
+//
+// WASAPI loopback capture of the default render endpoint (whatever the PC is
+// playing) -> S16 stereo PCM -> length-prefixed frames to the tablet, which plays
+// them through an AudioTrack. Opt-in via --audio.
+//
+// Wire format: a 12-byte plaintext header once per connection —
+//   [4B 'EXAU'][4B BE sampleRate][2B BE channels=2][2B BE bits=16]
+// then per-capture-packet frames [4B BE len][payload], where payload is raw
+// S16LE interleaved PCM (open link) or a [12B nonce][ct][16B tag] AES-GCM blob
+// (paired). Nonce prefix 0x02 domain-separates audio from video (0x01)/touch (0x00).
+
+// Convert one WASAPI capture packet (the endpoint mix format) to interleaved
+// S16 stereo. Handles the common float32 mix and 16/32-bit PCM; anything else
+// (rare 24-bit) becomes silence rather than noise.
+void mixToStereoS16(const BYTE* src, UINT32 frames, const WAVEFORMATEX* fmt,
+                    bool silent, std::vector<int16_t>& out) {
+    out.resize(static_cast<size_t>(frames) * 2);
+    if (out.empty()) return;
+    if (silent || src == nullptr) {
+        std::memset(out.data(), 0, out.size() * sizeof(int16_t));
+        return;
+    }
+    WORD tag = fmt->wFormatTag;
+    if (tag == WAVE_FORMAT_EXTENSIBLE)
+        tag = static_cast<WORD>(
+            reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(fmt)->SubFormat.Data1);
+    const int ch = fmt->nChannels;
+    auto clampF = [](float v) -> int16_t {
+        v *= 32767.0f;
+        if (v > 32767.0f) v = 32767.0f;
+        else if (v < -32768.0f) v = -32768.0f;
+        return static_cast<int16_t>(v);
+    };
+    if (tag == WAVE_FORMAT_IEEE_FLOAT) {
+        const float* f = reinterpret_cast<const float*>(src);
+        for (UINT32 i = 0; i < frames; ++i) {
+            const float l = f[i * ch];
+            out[i * 2] = clampF(l);
+            out[i * 2 + 1] = clampF(ch >= 2 ? f[i * ch + 1] : l);
+        }
+    } else if (tag == WAVE_FORMAT_PCM && fmt->wBitsPerSample == 16) {
+        const int16_t* s = reinterpret_cast<const int16_t*>(src);
+        for (UINT32 i = 0; i < frames; ++i) {
+            out[i * 2] = s[i * ch];
+            out[i * 2 + 1] = ch >= 2 ? s[i * ch + 1] : s[i * ch];
+        }
+    } else if (tag == WAVE_FORMAT_PCM && fmt->wBitsPerSample == 32) {
+        const int32_t* s = reinterpret_cast<const int32_t*>(src);
+        for (UINT32 i = 0; i < frames; ++i) {
+            out[i * 2] = static_cast<int16_t>(s[i * ch] >> 16);
+            out[i * 2 + 1] = static_cast<int16_t>((ch >= 2 ? s[i * ch + 1] : s[i * ch]) >> 16);
+        }
+    } else {
+        std::memset(out.data(), 0, out.size() * sizeof(int16_t));
+    }
+}
+
+void runAudioBridge(const std::string adb, const std::string host, int localPort,
+                    bool adbMode) {
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
+
+    IMMDeviceEnumerator* enumr = nullptr;
+    IMMDevice* dev = nullptr;
+    IAudioClient* client = nullptr;
+    IAudioCaptureClient* capture = nullptr;
+    WAVEFORMATEX* mixFmt = nullptr;
+    auto cleanup = [&]() {
+        if (capture) capture->Release();
+        if (client) client->Release();
+        if (dev) dev->Release();
+        if (enumr) enumr->Release();
+        if (mixFmt) CoTaskMemFree(mixFmt);
+    };
+
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                __uuidof(IMMDeviceEnumerator),
+                                reinterpret_cast<void**>(&enumr))) ||
+        FAILED(enumr->GetDefaultAudioEndpoint(eRender, eConsole, &dev)) ||
+        FAILED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                             reinterpret_cast<void**>(&client))) ||
+        FAILED(client->GetMixFormat(&mixFmt))) {
+        std::cerr << "Desktop audio: WASAPI init failed; continuing without audio.\n";
+        cleanup(); CoUninitialize(); return;
+    }
+    const REFERENCE_TIME hnsBuffer = 2000000;  // 200ms client buffer (100ns units)
+    if (FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                  hnsBuffer, 0, mixFmt, nullptr)) ||
+        FAILED(client->GetService(__uuidof(IAudioCaptureClient),
+                                  reinterpret_cast<void**>(&capture)))) {
+        std::cerr << "Desktop audio: WASAPI loopback unavailable; continuing without audio.\n";
+        cleanup(); CoUninitialize(); return;
+    }
+    const uint32_t sampleRate = mixFmt->nSamplesPerSec;
+    std::cout << "Desktop audio: capturing at " << sampleRate
+              << " Hz -> tablet (stereo 16-bit).\n";
+
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { cleanup(); CoUninitialize(); return; }
+
+    const std::string connectHost = adbMode ? "127.0.0.1" : host;
+    const int connectPort = adbMode ? localPort : kRemoteAudioPort;
+
+    std::vector<int16_t> pcm;
+    std::vector<uint8_t> blob;
+
+    while (!g_stop.load()) {
+        if (adbMode) {
+            runCapture(quote(adb) + " forward tcp:" + std::to_string(localPort) +
+                       " tcp:" + std::to_string(kRemoteAudioPort));
+        }
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock == INVALID_SOCKET) break;
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<u_short>(connectPort));
+        inet_pton(AF_INET, connectHost.c_str(), &addr.sin_addr);
+        if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+            closesocket(sock);
+            sleepInterruptible(2000);
+            continue;
+        }
+        BOOL noDelay = TRUE;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<char*>(&noDelay), sizeof(noDelay));
+
+        unsigned char hdr[12] = {
+            static_cast<unsigned char>(kAudioMagic >> 24), static_cast<unsigned char>(kAudioMagic >> 16),
+            static_cast<unsigned char>(kAudioMagic >> 8),  static_cast<unsigned char>(kAudioMagic),
+            static_cast<unsigned char>(sampleRate >> 24),  static_cast<unsigned char>(sampleRate >> 16),
+            static_cast<unsigned char>(sampleRate >> 8),   static_cast<unsigned char>(sampleRate),
+            0, 2,   // channels = 2
+            0, 16   // bits = 16
+        };
+        if (!sendAll(sock, hdr, 12)) { closesocket(sock); sleepInterruptible(1000); continue; }
+
+        AesGcm aenc;
+        const bool enc = g_pairKey && aenc.init(*g_pairKey);
+        uint8_t aPrefix[4] = {0x02, 0, 0, 0};
+        if (enc) BCryptGenRandom(nullptr, aPrefix + 1, 3, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        uint64_t aCtr = 0;
+
+        client->Reset();  // drop anything buffered from a prior session
+        client->Start();
+        bool alive = true;
+        while (!g_stop.load() && alive) {
+            UINT32 packetLen = 0;
+            if (FAILED(capture->GetNextPacketSize(&packetLen))) break;
+            if (packetLen == 0) { sleepInterruptible(5); continue; }
+            while (packetLen != 0 && alive) {
+                BYTE* data = nullptr;
+                UINT32 frames = 0;
+                DWORD flags = 0;
+                if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) {
+                    alive = false; break;
+                }
+                mixToStereoS16(data, frames, mixFmt,
+                               (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0, pcm);
+                capture->ReleaseBuffer(frames);
+
+                const unsigned char* payload = reinterpret_cast<const unsigned char*>(pcm.data());
+                int payloadLen = static_cast<int>(pcm.size() * sizeof(int16_t));
+                if (payloadLen == 0) {
+                    if (FAILED(capture->GetNextPacketSize(&packetLen))) alive = false;
+                    continue;
+                }
+                if (enc) {
+                    uint8_t nonce[kGcmNonceLen];
+                    std::memcpy(nonce, aPrefix, 4);
+                    ++aCtr;
+                    for (int i = 0; i < 8; ++i)
+                        nonce[4 + i] = static_cast<uint8_t>(aCtr >> (8 * (7 - i)));
+                    if (!aenc.encrypt(payload, payloadLen, nonce, blob)) { alive = false; break; }
+                    payload = blob.data();
+                    payloadLen = static_cast<int>(blob.size());
+                }
+                unsigned char lh[4] = {
+                    static_cast<unsigned char>(payloadLen >> 24), static_cast<unsigned char>(payloadLen >> 16),
+                    static_cast<unsigned char>(payloadLen >> 8),  static_cast<unsigned char>(payloadLen) };
+                if (!sendAll(sock, lh, 4) || !sendAll(sock, payload, payloadLen)) {
+                    alive = false; break;  // tablet closed the connection
+                }
+                if (FAILED(capture->GetNextPacketSize(&packetLen))) { alive = false; break; }
+            }
+        }
+        client->Stop();
+        closesocket(sock);
+        if (!g_stop.load()) sleepInterruptible(1000);
+    }
+    cleanup();
+    WSACleanup();
+    CoUninitialize();
+}
+
 // ----------------------------------------------------------------- discovery
 
 // Subnet-directed broadcast addresses for every local IPv4 interface, plus the
@@ -1363,6 +1563,7 @@ void printUsage() {
         "  --hevc            Use H.265/HEVC (sharper at high resolution)\n"
         "  --hdr             HDR10 output (10-bit BT.2020 PQ; implies --hevc)\n"
         "  --no-touch        Disable tablet touch -> mouse injection\n"
+        "  --audio           Stream desktop audio (PC playback) to the tablet\n"
         "  --wifi            Stream over Wi-Fi: auto-discover the tablet on the LAN\n"
         "  --udp             Low-latency UDP video over Wi-Fi (needs --wifi or --host)\n"
         "  --host IP         Advanced: stream straight to IP (WiFi), skip adb\n"
@@ -1417,6 +1618,10 @@ Options parseArgs(int argc, char** argv) {
             options.noZeroCopy = true; // HDR uses the 10-bit CPU capture path
         } else if (arg == "--no-touch") {
             options.noTouch = true;
+        } else if (arg == "--audio") {
+            options.audio = true;
+        } else if (arg == "--no-audio") {
+            options.audio = false;
         } else if (arg == "--wifi") {
             options.wifi = true;
         } else if (arg == "--udp") {
@@ -2048,6 +2253,13 @@ int main(int argc, char** argv) {
                         options.host.empty(), *selected)
                 .detach();
             std::cout << "Touch input bridge active (tablet touches control Windows).\n";
+        }
+
+        if (options.audio) {
+            std::thread(runAudioBridge, adb, options.host, options.port + 3,
+                        options.host.empty())
+                .detach();
+            std::cout << "Desktop audio bridge active (PC audio plays on the tablet).\n";
         }
 
         const int exitCode = runSupervised(options, ffmpeg, adb, exeDir, *selected);

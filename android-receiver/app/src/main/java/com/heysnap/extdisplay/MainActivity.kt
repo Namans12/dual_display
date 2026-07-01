@@ -1,6 +1,9 @@
 package com.heysnap.extdisplay
 
 import android.app.Activity
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.graphics.Typeface
@@ -47,6 +50,8 @@ private const val TAG = "ExtDisplay"
 private const val LISTEN_PORT = 5000
 private const val TOUCH_PORT = 5001
 private const val DISCOVERY_PORT = 5002
+private const val AUDIO_PORT = 5003
+private const val AUDIO_MAGIC = 0x45584155 // 'EXAU'
 private const val TOUCH_MAGIC = 0x48585450 // 'HXTP'
 private const val DISCOVERY_QUERY = "EXTDISP?v1"
 private const val DISCOVERY_REPLY_PREFIX = "EXTDISP!v1|"
@@ -106,6 +111,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var pairPanel: LinearLayout
     private var receiver: H264TcpReceiver? = null
     private val touchUplink = TouchUplink()
+    private val audioReceiver = AudioReceiver()
     private val discovery = DiscoveryResponder()
     @Volatile private var pairingKey: ByteArray? = null
 
@@ -117,6 +123,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(this)
         touchUplink.start()
+        audioReceiver.start()
         discovery.start(applicationContext)
 
         statusView = TextView(this).apply {
@@ -220,6 +227,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             pairingKey = null
             touchUplink.setKey(null)
             receiver?.setKey(null)
+            audioReceiver.setKey(null)
             return
         }
         if (code.length != 8) return  // wait until the full code is entered
@@ -227,7 +235,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             val key = Crypto.deriveKey(code)
             pairingKey = key
             touchUplink.setKey(key)
-            receiver?.setKey(key)   // decrypt the (UDP) video too
+            receiver?.setKey(key)   // decrypt the video too
+            audioReceiver.setKey(key)  // decrypt desktop audio too
             Log.i(TAG, "Paired: encryption enabled (key ${Crypto.hex(key).take(8)}…)")
             statusView.text = "Paired — link encrypted"
             // Show the completed code (green), then tuck the panel away — deferred so
@@ -359,6 +368,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         receiver?.stop()
         receiver = null
         touchUplink.stop()
+        audioReceiver.stop()
         discovery.stop()
         super.onDestroy()
     }
@@ -879,6 +889,115 @@ private class TouchUplink {
         val s = sealer
         queue.offer(if (s != null) s.seal(buf.array()) else buf.array())
     }
+}
+
+/**
+ * Desktop-audio player. The PC (WASAPI loopback) connects to AUDIO_PORT and sends a
+ * 12-byte format header [4B 'EXAU'][4B BE rate][2B BE channels][2B BE bits], then
+ * length-prefixed frames [4B BE len][payload] where payload is raw S16LE PCM (open
+ * link) or an AES-GCM blob (paired). We play it through an AudioTrack. Newest
+ * connection wins (a reconnect supersedes the stale socket), matching TouchUplink.
+ */
+private class AudioReceiver {
+    private val running = AtomicBoolean(false)
+    private var server: ServerSocket? = null
+    @Volatile private var current: Socket? = null
+    @Volatile private var sealer: Sealer? = null
+
+    /** Set the pairing key to decrypt incoming audio, or null for plaintext. */
+    fun setKey(key: ByteArray?) { sealer = key?.let { Sealer(it) } }
+
+    fun start() {
+        if (!running.compareAndSet(false, true)) return
+        thread(name = "audio-accept") {
+            while (running.get()) {
+                try {
+                    val s = ServerSocket().apply {
+                        reuseAddress = true
+                        bind(InetSocketAddress(AUDIO_PORT))
+                    }
+                    server = s
+                    Log.i(TAG, "AudioReceiver listening on $AUDIO_PORT")
+                    while (running.get()) {
+                        val sock = s.accept()
+                        sock.tcpNoDelay = true
+                        val old = current
+                        current = sock
+                        if (old != null) try { old.close() } catch (_: Exception) {}
+                        thread(name = "audio-play") { serve(sock) }
+                    }
+                } catch (_: Exception) {
+                    if (running.get()) Thread.sleep(300)
+                } finally {
+                    try { server?.close() } catch (_: Exception) {}
+                    server = null
+                }
+            }
+        }
+    }
+
+    private fun serve(sock: Socket) {
+        var track: AudioTrack? = null
+        try {
+            val inp = java.io.DataInputStream(java.io.BufferedInputStream(sock.getInputStream()))
+            val hdr = ByteArray(12)
+            inp.readFully(hdr)
+            if (beInt(hdr, 0) != AUDIO_MAGIC) return
+            val rate = beInt(hdr, 4)
+            val channels = beShort(hdr, 8)
+            if (rate !in 8000..192000) return
+            val mask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO
+                       else AudioFormat.CHANNEL_OUT_MONO
+            val minBuf = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT)
+            if (minBuf <= 0) return
+            track = AudioTrack.Builder()
+                .setAudioAttributes(AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build())
+                .setAudioFormat(AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(rate)
+                    .setChannelMask(mask)
+                    .build())
+                .setBufferSizeInBytes(minBuf * 2)  // ~short buffer to keep A/V roughly in sync
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            track.play()
+            Log.i(TAG, "Audio: playing ${rate}Hz ${channels}ch")
+
+            val lenBuf = ByteArray(4)
+            while (running.get() && current === sock) {
+                inp.readFully(lenBuf)
+                val n = beInt(lenBuf, 0)
+                if (n <= 0 || n > (1 shl 20)) break  // sanity / desync
+                val frame = ByteArray(n)
+                inp.readFully(frame)
+                val s = sealer
+                val pcm = if (s != null) (s.open(frame, 0, frame.size) ?: break) else frame
+                track.write(pcm, 0, pcm.size)  // blocks = natural pacing/backpressure
+            }
+        } catch (_: Exception) {
+            // socket closed or superseded by a newer connection
+        } finally {
+            try { track?.stop() } catch (_: Exception) {}
+            try { track?.release() } catch (_: Exception) {}
+            try { sock.close() } catch (_: Exception) {}
+            if (current === sock) current = null
+        }
+    }
+
+    fun stop() {
+        running.set(false)
+        try { server?.close() } catch (_: Exception) {}
+        try { current?.close() } catch (_: Exception) {}
+    }
+
+    private fun beInt(b: ByteArray, o: Int): Int =
+        ((b[o].toInt() and 0xff) shl 24) or ((b[o + 1].toInt() and 0xff) shl 16) or
+        ((b[o + 2].toInt() and 0xff) shl 8) or (b[o + 3].toInt() and 0xff)
+    private fun beShort(b: ByteArray, o: Int): Int =
+        ((b[o].toInt() and 0xff) shl 8) or (b[o + 1].toInt() and 0xff)
 }
 
 /**

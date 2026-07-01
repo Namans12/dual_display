@@ -79,3 +79,28 @@ The Windows host maps normalized coordinates onto the captured display's
 desktop rectangle and injects with `SendInput` (`MOUSEEVENTF_ABSOLUTE |
 MOUSEEVENTF_VIRTUALDESK`); down/up become left-button presses, so taps click
 and drags move windows. Single pointer in v1; disable with `--no-touch`.
+
+## Desktop Audio (implemented, opt-in `--audio`)
+
+A third channel carries PC playback to the tablet. The Android app listens on TCP
+port `5003`; the host (WASAPI loopback of the default render endpoint) connects
+(over USB: `adb forward tcp:<local> tcp:5003`) and sends a one-time **plaintext
+format header**, then a stream of **length-prefixed packets**. All fields
+**big-endian**:
+
+```text
+Header (12 bytes, once per connection):
+  uint32  magic         // 'EXAU' = 0x45584155
+  uint32  sampleRate    // e.g. 48000
+  uint16  channels      // 2
+  uint16  bitsPerSample // 16  (S16LE, interleaved)
+
+Then, repeated:
+  uint32  length        // bytes of payload that follow
+  byte[length] payload  // raw S16LE PCM, or an AES-GCM blob when paired
+```
+
+When a pairing code is set the payload is `[12B nonce][ciphertext][16B tag]`
+(nonce prefix `0x02`); otherwise it is the raw PCM. The tablet plays it through an
+`AudioTrack` (MODE_STREAM), newest-connection-wins. Audio and video are separate
+streams with no shared clock, so lip-sync is approximate.

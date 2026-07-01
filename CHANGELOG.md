@@ -4,6 +4,18 @@
 
 Improvements (Wi-Fi robustness + usability + security).
 
+- **Desktop audio (PC → tablet).** New opt-in "Desktop audio" checkbox (CLI:
+  `--audio`) streams whatever the PC is playing to the tablet's speakers. The
+  sender captures the default render endpoint via **WASAPI loopback** (no extra
+  driver), converts the mix to 16-bit stereo, and sends it length-prefixed over a
+  dedicated channel (TCP 5003; adb-forwarded on USB). The tablet plays it through
+  an `AudioTrack` (newest-connection-wins, like touch). When encryption is on the
+  audio is **AES-256-GCM** too (nonce prefix `0x02`, domain-separated from video
+  `0x01` / touch `0x00`); the 12-byte format header stays plaintext. Verified
+  on-device over USB: open link → `Audio: playing 48000Hz 2ch`; paired (correct
+  code) → continuous decrypted playback with a stable connection. A/V sync is
+  approximate (short AudioTrack buffer) and tunable — see [Fixes.md](Fixes.md).
+
 - **Security — PIN pairing + encrypted link (stages 1–3).** Opt-in "Encrypt" in
   the GUI mints an 8-char pairing code; you type it on the tablet once. Both derive
   the same AES-256 key via PBKDF2-HMAC-SHA256 (verified byte-identical across
