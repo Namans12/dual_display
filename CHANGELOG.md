@@ -7,13 +7,15 @@ Improvements (Wi-Fi robustness + usability + security).
 - **Security — PIN pairing + encrypted link (stages 1–3).** Opt-in "Encrypt" in
   the GUI mints an 8-char pairing code; you type it on the tablet once. Both derive
   the same AES-256 key via PBKDF2-HMAC-SHA256 (verified byte-identical across
-  Windows BCrypt and Android javax.crypto). **Both channels are now AES-256-GCM
+  Windows BCrypt and Android javax.crypto). **All channels are now AES-256-GCM
   encrypted + authenticated:** the touch/input channel (with a replay guard) and
-  the **UDP video** channel (per-NAL, domain-separated nonces). Verified on-device:
-  correct code → touch injects and video decodes at 2960×1848; wrong code → touch
-  rejected and no video. Over Wi-Fi the GUI forces the UDP path when encrypting;
-  over USB the video rides the physical adb link (touch still encrypted). Design,
-  threat model, and remaining polish in [SECURITY.md](SECURITY.md).
+  the **video channel on both transports** — UDP (per-NAL, then fragment) *and*
+  TCP (the sender proxies ffmpeg and length-prefixes each encrypted NAL). Nonces
+  are domain-separated (video `0x01` / touch `0x00`). Verified on-device: correct
+  code → touch injects and video decodes at 2960×1848 on both TCP and UDP; wrong
+  code → touch rejected and no video. Encrypted Wi-Fi now keeps TCP's smoothness
+  (**no longer forced onto UDP**). Design, threat model, and remaining polish in
+  [SECURITY.md](SECURITY.md).
   - Pairing entry on the tablet is a boxed, monospaced, letter-spaced field (reads
     like blocks), 8-char capped/auto-caps. Auto-apply on the 8th char is deferred a
     frame so the final character renders before the panel tucks away (it used to
@@ -29,6 +31,12 @@ Improvements (Wi-Fi robustness + usability + security).
   (`TOOL_TYPE_ERASER`, e.g. a flipped Surface Pen) but deliberately don't map the S
   Pen button (it only produced glitchy mixed strokes). See [Fixes.md](Fixes.md).
 
+- **Smooth 120 fps.** At native 2960×1848, 120 Hz overruns the capture+encode
+  throughput (~656 Mpix/s — past 4K60), so frames back up and even the cursor
+  drags. When `--fps 120` is selected the sender now drops the virtual display to a
+  lighter 1920×1200 mode the pipeline sustains at 120 Hz (the tablet upscales to
+  its panel); it restores native automatically for ≤60 fps. Verified: ffmpeg holds
+  **fps=119 at 0.989× speed** (real-time) where native 60 fps ran at 0.9× (behind).
 - **UDP path robustness:** a bigger socket send buffer (4 MB) so a keyframe's
   fragment burst isn't dropped by the OS/Wi-Fi driver. (Intra-refresh was tried but
   **reverted** — removing periodic IDRs left the decoder with nothing to resync on

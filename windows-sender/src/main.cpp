@@ -539,6 +539,21 @@ void configureVirtualDisplay(const DisplayInfo& display) {
     }
 }
 
+// Sets the given display (by GDI name) to a specific mode. Used to drop the VDD to
+// a lighter resolution for 120 Hz, which native 2960x1848 can't sustain through the
+// capture+encode path. Returns true on success.
+bool setDisplayResolution(const std::string& gdiName, int w, int h, int hz) {
+    DEVMODEA mode{};
+    mode.dmSize = sizeof(mode);
+    if (!EnumDisplaySettingsA(gdiName.c_str(), ENUM_CURRENT_SETTINGS, &mode)) return false;
+    mode.dmPelsWidth = static_cast<DWORD>(w);
+    mode.dmPelsHeight = static_cast<DWORD>(h);
+    mode.dmDisplayFrequency = static_cast<DWORD>(hz);
+    mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+    return ChangeDisplaySettingsExA(gdiName.c_str(), &mode, nullptr,
+                                    CDS_UPDATEREGISTRY, nullptr) == DISP_CHANGE_SUCCESSFUL;
+}
+
 // Extends the desktop onto the VDD monitor (activating it) and returns it.
 bool tryEnableVirtualDisplay(const std::string& /*exeDir*/) {
     std::cout << "Activating the virtual display...\n";
@@ -815,9 +830,10 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
         cmd << " -colorspace bt2020nc -color_primaries bt2020 -color_trc smpte2084";
     }
 
-    // UDP path: emit Annex-B to stdout; the sender packetizes it onto UDP.
-    // TCP path: ffmpeg connects to the tablet's listener directly.
-    if (options.udp) {
+    // Route through the sender (Annex-B on stdout) for UDP, and also for encrypted
+    // TCP where the sender AES-GCMs each NAL before sending. Plain TCP lets ffmpeg
+    // connect to the tablet's listener directly.
+    if (options.udp || g_pairKey) {
         cmd << " -f " << (isHevc ? "hevc" : "h264") << " pipe:1";
     } else {
         cmd << " -f " << (isHevc ? "hevc" : "h264")
@@ -1127,6 +1143,16 @@ bool recvFull(SOCKET sock, unsigned char* buffer, int length) {
         }
         if (n == 0) return false;  // peer closed
         got += n;
+    }
+    return true;
+}
+
+bool sendAll(SOCKET sock, const unsigned char* buffer, int length) {
+    int sent = 0;
+    while (sent < length) {
+        const int n = send(sock, reinterpret_cast<const char*>(buffer) + sent, length - sent, 0);
+        if (n == SOCKET_ERROR || n == 0) return false;
+        sent += n;
     }
     return true;
 }
@@ -1583,6 +1609,116 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
     return uptime;
 }
 
+// Encrypted TCP video: route ffmpeg's NALs through the sender, AES-256-GCM each one,
+// and send it length-prefixed over a reliable TCP connection to the tablet. Used
+// when paired (g_pairKey) and NOT --udp, so encrypted Wi-Fi keeps TCP's
+// no-dropped-frames smoothness. Wire frame: [4-byte BE length][12B nonce][ct][16B tag].
+ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host, int tcpPort) {
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) { WSACleanup(); return 0; }
+    sockaddr_in dest{};
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(static_cast<u_short>(tcpPort));
+    inet_pton(AF_INET, host.c_str(), &dest.sin_addr);
+    if (connect(sock, reinterpret_cast<sockaddr*>(&dest), sizeof(dest)) != 0) {
+        closesocket(sock); WSACleanup(); return 0;
+    }
+    BOOL noDelay = TRUE;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&noDelay), sizeof(noDelay));
+
+    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    HANDLE readPipe = nullptr, writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 1 << 20)) { closesocket(sock); WSACleanup(); return 0; }
+    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOA si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = writePipe;
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION pi{};
+    std::string mutableCmd = cmd;
+    if (!CreateProcessA(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(readPipe); CloseHandle(writePipe); closesocket(sock); WSACleanup(); return 0;
+    }
+    CloseHandle(writePipe);
+    g_child.store(pi.hProcess);
+    const ULONGLONG started = GetTickCount64();
+
+    AesGcm venc;
+    bool encOk = g_pairKey && venc.init(*g_pairKey);
+    uint8_t vPrefix[4] = {0x01, 0, 0, 0};
+    if (encOk) BCryptGenRandom(nullptr, vPrefix + 1, 3, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    uint64_t vCtr = 0;
+    std::vector<uint8_t> blob;
+    bool alive = encOk;
+
+    auto sendNal = [&](const unsigned char* nal, size_t len) {
+        if (len == 0 || !alive) return;
+        uint8_t nonce[kGcmNonceLen];
+        std::memcpy(nonce, vPrefix, 4);
+        ++vCtr;
+        for (int i = 0; i < 8; ++i) nonce[4 + i] = static_cast<uint8_t>(vCtr >> (8 * (7 - i)));
+        if (!venc.encrypt(nal, static_cast<int>(len), nonce, blob)) return;
+        const uint32_t n = static_cast<uint32_t>(blob.size());
+        unsigned char hdr[4] = { static_cast<unsigned char>(n >> 24), static_cast<unsigned char>(n >> 16),
+                                 static_cast<unsigned char>(n >> 8), static_cast<unsigned char>(n) };
+        if (!sendAll(sock, hdr, 4) || !sendAll(sock, blob.data(), static_cast<int>(blob.size()))) {
+            alive = false;  // tablet closed the connection
+        }
+    };
+
+    auto startCodeLen = [](const std::vector<unsigned char>& b, size_t i) -> int {
+        if (i + 3 <= b.size() && b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 1) return 3;
+        if (i + 4 <= b.size() && b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 0 && b[i + 3] == 1) return 4;
+        return 0;
+    };
+    auto nextStart = [&](const std::vector<unsigned char>& b, size_t from) -> size_t {
+        for (size_t i = from; i + 3 <= b.size(); ++i) {
+            if (b[i] == 0 && b[i + 1] == 0 &&
+                (b[i + 2] == 1 || (b[i + 2] == 0 && i + 3 < b.size() && b[i + 3] == 1))) {
+                return i;
+            }
+        }
+        return std::string::npos;
+    };
+
+    std::vector<unsigned char> buf;
+    buf.reserve(1 << 20);
+    unsigned char chunk[65536];
+    DWORD got = 0;
+    size_t base = std::string::npos;
+    while (!g_stop.load() && alive &&
+           ReadFile(readPipe, chunk, sizeof(chunk), &got, nullptr) && got > 0) {
+        buf.insert(buf.end(), chunk, chunk + got);
+        if (base == std::string::npos) base = nextStart(buf, 0);
+        if (base == std::string::npos) continue;
+        size_t next = nextStart(buf, base + startCodeLen(buf, base));
+        while (next != std::string::npos) {
+            sendNal(buf.data() + base, next - base);
+            base = next;
+            next = nextStart(buf, base + startCodeLen(buf, base));
+        }
+        if (base > 0) { buf.erase(buf.begin(), buf.begin() + base); base = 0; }
+    }
+
+    WaitForSingleObject(pi.hProcess, g_stop.load() ? 0 : INFINITE);
+    if (g_stop.load()) TerminateProcess(pi.hProcess, 1);
+    ULONGLONG uptime = GetTickCount64() - started;
+    DWORD exitCode = 0;
+    if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0 && exitCode != STILL_ACTIVE) {
+        uptime = 0;
+    }
+    g_child.exchange(nullptr);
+    CloseHandle(readPipe);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    closesocket(sock);
+    WSACleanup();
+    return uptime;
+}
+
 // Quick TCP reachability probe to the tablet's listener (works for USB via the
 // adb-forwarded 127.0.0.1 and for Wi-Fi direct). Distinguishes "tablet gone"
 // from "encoder failed" so a disconnect doesn't get blamed on the encoder.
@@ -1669,15 +1805,18 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
         }
 
         const std::string cmd = buildStreamCommand(ffmpeg, options, display, attempt, host);
+        const bool encTcp = !options.udp && g_pairKey.has_value();
         std::cout << "\nStreaming " << display.name
                   << " with " << attempt.encoder
                   << (attempt.zeroCopy ? " (GPU zero-copy)" : "")
-                  << (options.udp ? " over UDP" : "")
+                  << (options.udp ? " over UDP" : (encTcp ? " over TCP (encrypted)" : ""))
                   << " -> " << host << ":" << options.port << "\n";
 
         ULONGLONG uptime = 0;
         if (options.udp) {
             uptime = runUdpAttempt(cmd, host, options.port);
+        } else if (encTcp) {
+            uptime = runEncryptedTcpAttempt(cmd, host, options.port);
         } else {
             PROCESS_INFORMATION pi{};
             if (!spawnProcess(cmd, pi)) {
@@ -1864,6 +2003,27 @@ int main(int argc, char** argv) {
                   << selected->width << "x" << selected->height
                   << " (adapter " << selected->adapterIndex
                   << ", output " << selected->outputIndex << ")\n";
+
+        // 120 Hz at native 2960x1848 is past the capture+encode throughput (frames
+        // back up, the cursor drags). Drop the VDD to a lighter 16:10 mode the
+        // pipeline sustains at 120 Hz; the tablet upscales to its panel. For <120 fps
+        // restore native (a prior 120 fps run persists the lowered mode in the
+        // registry, so a later 60 fps run would otherwise stay at 1920x1200).
+        if (options.fps >= 120 && selected->width > 1920) {
+            if (setDisplayResolution(selected->name, 1920, 1200, options.fps)) {
+                Sleep(1000);
+                selected->width = 1920;
+                selected->height = 1200;
+                std::cout << "120 fps: virtual display set to 1920x1200 for smooth 120 Hz.\n";
+            }
+        } else if (options.fps < 120 && selected->width < 2960) {
+            if (setDisplayResolution(selected->name, 2960, 1848, 120)) {
+                Sleep(1000);
+                selected->width = 2960;
+                selected->height = 1848;
+                std::cout << "Restored virtual display to native 2960x1848.\n";
+            }
+        }
 
         if (options.hdr) {
             if (setAdvancedColor(selected->name, true)) {

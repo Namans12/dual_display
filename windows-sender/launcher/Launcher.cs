@@ -229,10 +229,10 @@ namespace ExtendedDisplay
                 if (ip.Length > 0) sb.Append(" --host " + ip);
                 else sb.Append(" --wifi");
             }
-            // Encrypted video rides the UDP path (that's where the sender routes and
-            // encrypts NALs), so force UDP when encrypting over Wi-Fi.
-            if ((chkUdp.Checked && chkUdp.Enabled) || (chkEncrypt.Checked && rbWifi.Checked))
-                sb.Append(" --udp");
+            // Encryption now works on both transports (the sender encrypts NALs for
+            // UDP and length-prefixed TCP), so honour the user's UDP choice directly —
+            // no need to force UDP when encrypting. TCP stays smoother on good Wi-Fi.
+            if (chkUdp.Checked && chkUdp.Enabled) sb.Append(" --udp");
             if (chkHdr.Checked) sb.Append(" --hdr");
             else if (chkHevc.Checked) sb.Append(" --hevc");
             if (!chkTouch.Checked) sb.Append(" --no-touch");

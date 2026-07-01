@@ -508,10 +508,29 @@ private class H264TcpReceiver(
                 server!!.accept().use { socket ->
                     socket.tcpNoDelay = true
                     onStatus("Connected (USB/TCP): ${socket.inetAddress.hostAddress}")
-                    val splitter = AnnexBNalSplitter(socket.getInputStream())
-                    while (running.get()) {
-                        val nal = splitter.nextNal() ?: break
-                        nalQueue.put(nal)
+                    val s = videoSealer
+                    if (s != null) {
+                        // Paired: length-prefixed encrypted frames [4B BE len][nonce+ct+tag].
+                        val inp = java.io.DataInputStream(socket.getInputStream())
+                        val lenBuf = ByteArray(4)
+                        while (running.get()) {
+                            inp.readFully(lenBuf)
+                            val n = ((lenBuf[0].toInt() and 0xff) shl 24) or
+                                    ((lenBuf[1].toInt() and 0xff) shl 16) or
+                                    ((lenBuf[2].toInt() and 0xff) shl 8) or
+                                    (lenBuf[3].toInt() and 0xff)
+                            if (n <= 0 || n > (8 shl 20)) break  // sanity / desync
+                            val frame = ByteArray(n)
+                            inp.readFully(frame)
+                            val nal = s.open(frame, 0, frame.size) ?: break  // wrong code / tamper
+                            nalQueue.put(nal)
+                        }
+                    } else {
+                        val splitter = AnnexBNalSplitter(socket.getInputStream())
+                        while (running.get()) {
+                            val nal = splitter.nextNal() ?: break
+                            nalQueue.put(nal)
+                        }
                     }
                 }
             } catch (ex: Exception) {

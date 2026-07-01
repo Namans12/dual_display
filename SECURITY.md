@@ -64,14 +64,18 @@ can't authenticate it, it reports "wrong pairing code" and disconnects.
    code display in the GUI. ✅ **Done + verified**: correct code → touch decrypts
    and injects; wrong code → auth fails → rejected (no injection). Replay guard via
    a monotonic nonce counter.
-3. **Video channel** — ✅ **Done + verified** for the **UDP path** (the recommended
-   Wi-Fi transport): the sender AES-GCM-encrypts each NAL before fragmenting; the
-   tablet reassembles and decrypts. Nonce prefix byte `0x01` domain-separates video
-   from touch (`0x00`) under the shared key. Verified: correct code → video decodes
-   at 2960×1848; wrong code → no video. The GUI forces UDP when encrypting over
-   Wi-Fi. (Over USB the video rides adb/TCP and stays plaintext — a physical link;
-   touch is still encrypted. Encrypting the TCP video path is future work — it needs
-   the sender to proxy ffmpeg's TCP output.)
+3. **Video channel** — ✅ **Done + verified on both transports.** The sender
+   AES-256-GCM-encrypts each NAL; nonce prefix `0x01` domain-separates video from
+   touch (`0x00`) under the shared key.
+   - **UDP:** encrypt each NAL, then fragment (EXUD header stays plaintext for
+     reassembly); the tablet reassembles then decrypts.
+   - **TCP:** the sender proxies ffmpeg's output and sends each encrypted NAL
+     length-prefixed (`[4B len][12B nonce][ct][16B tag]`); the tablet reads frames
+     and decrypts. So encrypted Wi-Fi keeps TCP's no-dropped-frames smoothness (no
+     longer forced onto UDP).
+   Verified on-device: correct code → video decodes at 2960×1848 on both TCP and
+   UDP; wrong code → no video. Over USB the same encrypted TCP framing rides the
+   adb link.
 4. **Polish** (todo) — "wrong code" UX in the GUI, remember pairing (store the
    derived key on the tablet so the code is entered once), optional toggle to run
    open on a trusted LAN.
