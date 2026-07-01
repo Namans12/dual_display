@@ -4,13 +4,16 @@
 
 Improvements (Wi-Fi robustness + usability + security).
 
-- **Security — PIN pairing + encrypted touch (stages 1–2).** Opt-in "Encrypt" in
+- **Security — PIN pairing + encrypted link (stages 1–3).** Opt-in "Encrypt" in
   the GUI mints an 8-char pairing code; you type it on the tablet once. Both derive
   the same AES-256 key via PBKDF2-HMAC-SHA256 (verified byte-identical across
-  Windows BCrypt and Android javax.crypto). The **touch/input channel is now
-  AES-256-GCM encrypted + authenticated** with a replay guard — verified: correct
-  code injects, wrong code is rejected (no unauthorized control of the PC). Video
-  encryption is the next stage. Design + threat model in [SECURITY.md](SECURITY.md).
+  Windows BCrypt and Android javax.crypto). **Both channels are now AES-256-GCM
+  encrypted + authenticated:** the touch/input channel (with a replay guard) and
+  the **UDP video** channel (per-NAL, domain-separated nonces). Verified on-device:
+  correct code → touch injects and video decodes at 2960×1848; wrong code → touch
+  rejected and no video. Over Wi-Fi the GUI forces the UDP path when encrypting;
+  over USB the video rides the physical adb link (touch still encrypted). Design,
+  threat model, and remaining polish in [SECURITY.md](SECURITY.md).
 
 - **Wi-Fi loss resilience:** the UDP path now uses rolling **intra-refresh**
   (nvenc/x264) so a dropped packet self-heals within a refresh cycle instead of

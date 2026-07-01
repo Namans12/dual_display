@@ -188,6 +188,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             val key = Crypto.deriveKey(code)
             pairingKey = key
             touchUplink.setKey(key)
+            receiver?.setKey(key)   // decrypt the (UDP) video too
             pairInput.visibility = View.GONE
             statusView.text = "Paired — link encrypted"
             hideSystemUi()
@@ -314,7 +315,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             surface = holder.surface,
             onStatus = { status -> runOnUiThread { statusView.text = status } },
             onVideoSize = { w, h -> runOnUiThread { applyVideoSize(w, h) } }
-        ).also { it.start() }
+        ).also { it.setKey(pairingKey); it.start() }
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -410,6 +411,10 @@ private class H264TcpReceiver(
     private var server: ServerSocket? = null
     private var udpSocket: java.net.DatagramSocket? = null
     private var codec: MediaCodec? = null
+    @Volatile private var videoSealer: Sealer? = null
+
+    /** Set the pairing key to decrypt the (UDP) video, or null for plaintext. */
+    fun setKey(key: ByteArray?) { videoSealer = key?.let { Sealer(it) } }
 
     // Both transports push complete NAL units here; one decode loop consumes
     // them, so the host can use TCP (reliable) or UDP (low latency) and the app
@@ -474,8 +479,13 @@ private class H264TcpReceiver(
                     bind(InetSocketAddress(LISTEN_PORT))
                 }
                 udpSocket = sock
-                val reasm = UdpReassembler { nal ->
-                    if (running.get()) nalQueue.offer(nal)
+                val reasm = UdpReassembler { blob ->
+                    if (!running.get()) return@UdpReassembler
+                    // When paired, each reassembled blob is an AES-GCM frame; decrypt
+                    // to the NAL (drop on auth failure = wrong code / tampering).
+                    val s = videoSealer
+                    val nal = if (s != null) s.open(blob, 0, blob.size) else blob
+                    if (nal != null) nalQueue.offer(nal)
                 }
                 val buf = ByteArray(2048)
                 var announced = false

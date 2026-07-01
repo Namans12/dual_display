@@ -1479,16 +1479,39 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
     g_child.store(pi.hProcess);
     const ULONGLONG started = GetTickCount64();
 
+    // When paired, encrypt each NAL end-to-end. The EXUD header stays plaintext
+    // (needed for reassembly); the fragmented payload is the AES-GCM blob
+    // [12B nonce][ct][16B tag], so a sniffer sees only opaque fragments. Nonce
+    // prefix byte 0 = 0x01 domain-separates video from the touch channel (0x00)
+    // under the shared key.
+    AesGcm venc;
+    bool vEnc = g_pairKey && venc.init(*g_pairKey);
+    uint8_t vPrefix[4] = {0x01, 0, 0, 0};
+    if (vEnc) BCryptGenRandom(nullptr, vPrefix + 1, 3, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    uint64_t vCtr = 0;
+
     uint32_t nalSeq = 0;
+    std::vector<uint8_t> encBlob;
     auto sendNal = [&](const unsigned char* nal, size_t len) {
         if (len == 0) return;
+        const unsigned char* data = nal;
+        size_t dlen = len;
+        if (vEnc) {
+            uint8_t nonce[kGcmNonceLen];
+            std::memcpy(nonce, vPrefix, 4);
+            ++vCtr;
+            for (int i = 0; i < 8; ++i) nonce[4 + i] = static_cast<uint8_t>(vCtr >> (8 * (7 - i)));
+            if (!venc.encrypt(nal, static_cast<int>(len), nonce, encBlob)) return;
+            data = encBlob.data();
+            dlen = encBlob.size();
+        }
         const uint16_t fragCount = static_cast<uint16_t>(
-            (len + kUdpPayloadMax - 1) / kUdpPayloadMax);
+            (dlen + kUdpPayloadMax - 1) / kUdpPayloadMax);
         unsigned char pkt[kUdpHeaderSize + kUdpPayloadMax];
         for (uint16_t f = 0; f < fragCount; ++f) {
             const size_t off = static_cast<size_t>(f) * kUdpPayloadMax;
-            const size_t chunk = (len - off < static_cast<size_t>(kUdpPayloadMax))
-                                     ? (len - off) : static_cast<size_t>(kUdpPayloadMax);
+            const size_t chunk = (dlen - off < static_cast<size_t>(kUdpPayloadMax))
+                                     ? (dlen - off) : static_cast<size_t>(kUdpPayloadMax);
             auto b = [](uint32_t v) { return static_cast<unsigned char>(v & 0xFF); };
             pkt[0] = b(kUdpMagic >> 24); pkt[1] = b(kUdpMagic >> 16);
             pkt[2] = b(kUdpMagic >> 8);  pkt[3] = b(kUdpMagic);
@@ -1496,7 +1519,7 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
             pkt[6] = b(nalSeq >> 8);  pkt[7] = b(nalSeq);
             pkt[8] = b(f >> 8);          pkt[9] = b(f);
             pkt[10] = b(fragCount >> 8); pkt[11] = b(fragCount);
-            memcpy(pkt + kUdpHeaderSize, nal + off, chunk);
+            memcpy(pkt + kUdpHeaderSize, data + off, chunk);
             sendto(sock, reinterpret_cast<char*>(pkt),
                    static_cast<int>(kUdpHeaderSize + chunk), 0,
                    reinterpret_cast<sockaddr*>(&dest), sizeof(dest));

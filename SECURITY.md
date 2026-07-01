@@ -64,10 +64,17 @@ can't authenticate it, it reports "wrong pairing code" and disconnects.
    code display in the GUI. ✅ **Done + verified**: correct code → touch decrypts
    and injects; wrong code → auth fails → rejected (no injection). Replay guard via
    a monotonic nonce counter.
-3. **Video channel** — encrypt 5000 (UDP datagrams; route TCP through the sender).
-   Verify: paired tablet shows the stream; sniffer/unpaired sees nothing usable.
-4. **Polish** — "wrong code" UX, remember pairing (store derived key on the tablet
-   so the code is entered once), optional toggle to run open on a trusted LAN.
+3. **Video channel** — ✅ **Done + verified** for the **UDP path** (the recommended
+   Wi-Fi transport): the sender AES-GCM-encrypts each NAL before fragmenting; the
+   tablet reassembles and decrypts. Nonce prefix byte `0x01` domain-separates video
+   from touch (`0x00`) under the shared key. Verified: correct code → video decodes
+   at 2960×1848; wrong code → no video. The GUI forces UDP when encrypting over
+   Wi-Fi. (Over USB the video rides adb/TCP and stays plaintext — a physical link;
+   touch is still encrypted. Encrypting the TCP video path is future work — it needs
+   the sender to proxy ffmpeg's TCP output.)
+4. **Polish** (todo) — "wrong code" UX in the GUI, remember pairing (store the
+   derived key on the tablet so the code is entered once), optional toggle to run
+   open on a trusted LAN.
 
 Opt-in: streams stay open (today's behaviour) unless a pairing code is set, so a
 trusted home LAN needn't change. Encryption engages automatically once paired.
