@@ -106,14 +106,22 @@ namespace ExtendedDisplay
 
         string ResolveSenderPath()
         {
-            // The sender ships in the same folder as this launcher (the installer
-            // lays them side by side). Fall back to the dev build tree so the
-            // launcher also runs straight from a checkout.
-            string here = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ExtendedDisplaySender.exe");
-            if (File.Exists(here)) return here;
-            string dev = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
-                @"..\..\build\Release\ExtendedDisplaySender.exe");
-            return Path.GetFullPath(dev);
+            // Packaged: the sender sits beside this launcher. Dev tree: the launcher
+            // may run from windows-sender\launcher\ (sender in ..\build\Release) or
+            // from windows-sender\build\Release\ (sender beside it). Try each.
+            string bd = AppDomain.CurrentDomain.BaseDirectory;
+            string[] candidates =
+            {
+                Path.Combine(bd, "ExtendedDisplaySender.exe"),
+                Path.Combine(bd, @"..\build\Release\ExtendedDisplaySender.exe"),
+                Path.Combine(bd, @"..\..\build\Release\ExtendedDisplaySender.exe"),
+            };
+            foreach (var c in candidates)
+            {
+                string full = Path.GetFullPath(c);
+                if (File.Exists(full)) return full;
+            }
+            return Path.GetFullPath(candidates[0]);
         }
 
         void SetStatus(string msg, Color color)
