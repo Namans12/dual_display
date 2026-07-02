@@ -10,9 +10,10 @@ native virtual display (CGVirtualDisplay, 2960x1848@60 HiDPI)
   → Android MediaCodec → screen
 ```
 
-Video, a native extended display, tablet-touch control, LAN discovery, and PIN
-pairing with AES-256-GCM encryption all work; desktop audio, real multi-touch/
-pen, UDP, 120 fps and HDR remain Windows-only (see the matrix below).
+Video (TCP + UDP, H.264 + HEVC, up to 120 fps), a native extended display,
+tablet-touch control with S Pen pressure, desktop audio, LAN discovery, and
+PIN pairing with AES-256-GCM encryption all work. Remaining Windows-only:
+real multi-touch injection and HDR (see the matrix and Limitations).
 
 ## Mac vs Windows — what works where
 
@@ -22,7 +23,7 @@ pen, UDP, 120 fps and HDR remain Windows-only (see the matrix below).
 | Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848@60 HiDPI (default) |
 | Tablet discovery | ✅ UDP broadcast | ✅ `--wifi` (UDP broadcast), or `--host <ip>` |
 | Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse + S Pen pressure (tablet-point events) |
-| Desktop audio → tablet | ✅ | ❌ |
+| Desktop audio → tablet | ✅ WASAPI loopback | ✅ ScreenCaptureKit system audio (`--audio`) |
 | PIN pairing + AES-256-GCM encryption | ✅ all channels | ✅ video + touch (audio n/a) |
 | 120 fps mode switch | ✅ 1920x1200@120 | ✅ 1920x1200@120 (`--fps 120`) |
 | HDR | ✅ HDR10 via VDD | ❌ (virtual display is SDR — see Limitations) |
@@ -153,6 +154,32 @@ virtual display is 16:10 like the tablet, so nothing to match). When capturing
 a 16:9 display with `--display N`, pass e.g. `--width 2560 --height 1440` to
 keep the aspect ratio — the tablet letterboxes automatically.
 
+## Desktop audio (optional)
+
+`--audio` streams whatever the Mac is playing to the tablet's speakers —
+ScreenCaptureKit captures the system mix (the same Screen Recording permission
+covers it), converted to 16-bit stereo and sent on its own channel (TCP 5003;
+adb-forwarded over USB). When paired, audio frames are AES-GCM-sealed like
+everything else, and the tablet stays silent until the code is entered.
+
+- `--mute-local` silences the Mac's own speakers while streaming (re-asserted
+  if volume keys un-mute; restored on stop, self-healing if force-killed).
+- `--audio-delay-ms N` (default 40) sizes the tablet's audio buffer — raise it
+  if audio leads the video.
+- Audio and video are separate streams with no shared clock; lip-sync is
+  approximate (same as the Windows host).
+
+## DMG launcher settings (no GUI needed)
+
+The packaged launcher reads two optional files from
+`~/Library/Application Support/ExtendedDisplay/`:
+
+- `pairing.code` — an 8-char pairing code; exported as `EXTDISPLAY_KEY` so the
+  launcher's stream is encrypted (Windows-GUI parity: its persisted code lives
+  in `%LOCALAPPDATA%\ExtendedDisplay\pairing.code`).
+- `options` — extra MacHost arguments on one line, e.g.
+  `--audio --mute-local --fps 120`.
+
 ## Pairing + encryption (optional)
 
 For an untrusted LAN, the Mac host encrypts the **video and touch** channels
@@ -167,10 +194,11 @@ EXTDISPLAY_KEY=AB2CD3EF .build/release/MacHost --host 127.0.0.1
 Both sides derive the same key — `PBKDF2-HMAC-SHA256(code, "ExtDisplay/v1",
 200000)` — so no key material crosses the network. The tablet remembers the
 derived key, so you type the code **once, ever**. Video is sent as the
-`EXVE`-marked encrypted stream (the tablet shows nothing until you enter the
-code, then decrypts on the same connection); touch packets are sealed 56-byte
-frames the host rejects on a wrong code (no cursor injection from strangers).
-Audio isn't a Mac feature yet, so there's no audio channel to encrypt.
+`EXVE`-marked encrypted stream over TCP (the tablet shows nothing until you
+enter the code, then decrypts on the same connection) or as sealed NALs behind
+the plaintext `EXUD` header over UDP; touch packets are sealed 56-byte frames
+the host rejects on a wrong code (no cursor injection from strangers); audio
+frames are sealed with their own nonce domain (`0x02`).
 
 Verify the KDF matches the other platforms byte-for-byte:
 
@@ -207,7 +235,9 @@ Verify the KDF matches the other platforms byte-for-byte:
 - **Choppy / lagging** → lower `--fps` (30) or `--bitrate`; the TCP write runs
   on the encoder callback thread, so severe Wi-Fi backpressure stalls encoding
   (harmless over USB).
-- **Tablet touches do nothing** → expected; touch injection is Windows-only.
+- **Tablet touches do nothing** → the Accessibility permission isn't granted
+  (see Requirements); MacHost prints a warning at start when that's the case.
+  `--no-touch` also disables injection deliberately.
 
 ## Limitations (honest)
 
@@ -215,10 +245,13 @@ Verify the KDF matches the other platforms byte-for-byte:
   into arbitrary apps — Windows has `InjectTouchInput`). S Pen **pressure** is
   carried on the mouse events as tablet-point data, so pressure-aware apps
   respond; full eraser semantics need tablet *proximity* events (future).
-- No desktop-audio channel yet (so nothing to encrypt there); the audio path
-  lives only in the Windows host (see [SECURITY.md](../SECURITY.md) and the
-  README feature table).
+- **No HDR**: the virtual display's framebuffer is SDR — the known
+  CGVirtualDisplay surface exposes no EDR capability (Windows gets HDR from
+  its VDD driver). Capturing a real HDR-capable display could grow this later.
 - The virtual display can't be removed *without* exiting MacHost — releasing
   it while the process runs leaves it online (macOS 26). It is removed on exit,
   so in practice this only matters if you wanted to drop it mid-session.
-- Fixed capture size; no 120 fps auto-mode-switch, no HDR.
+- Audio/video are separate streams with no shared clock (lip-sync approximate,
+  tune `--audio-delay-ms`) — same as the Windows host.
+- No settings GUI — the DMG launcher plus the `pairing.code`/`options` files
+  cover the plug-and-play story (see above).

@@ -106,7 +106,24 @@ fi
 "$ADB" shell am start -n com.heysnap.extdisplay/.MainActivity
 sleep 1.5
 
-exec "$DIR/MacHost" --host 127.0.0.1 --port 5000
+# Settings without a GUI (parity with the Windows GUI's persisted state):
+#   pairing.code — the 8-char pairing code; exported as EXTDISPLAY_KEY so the
+#                  stream is encrypted (never passed on the command line).
+#   options      — extra MacHost arguments, e.g.: --audio --mute-local --fps 120
+CFG="$HOME/Library/Application Support/ExtendedDisplay"
+if [[ -s "$CFG/pairing.code" ]]; then
+    EXTDISPLAY_KEY="$(head -1 "$CFG/pairing.code" | tr -d '[:space:]')"
+    export EXTDISPLAY_KEY
+    echo "Pairing code loaded from pairing.code — link will be encrypted."
+fi
+EXTRA_ARGS=()
+if [[ -s "$CFG/options" ]]; then
+    # shellcheck disable=SC2207
+    EXTRA_ARGS=($(head -1 "$CFG/options"))
+    echo "Extra options: ${EXTRA_ARGS[*]}"
+fi
+
+exec "$DIR/MacHost" --host 127.0.0.1 --port 5000 "${EXTRA_ARGS[@]}"
 LAUNCHER
 chmod +x "$APP/Contents/MacOS/ExtendedDisplay" "$APP/Contents/MacOS/MacHost"
 

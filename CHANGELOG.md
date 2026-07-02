@@ -161,12 +161,23 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
   injected `subtype=1 pressure=1.00` events; finger swipe → `subtype=0`.
   Full eraser semantics need tablet *proximity* events (future).
 
-The Mac host is no longer "video-only": it now does a native extended display,
-touch-back with S Pen pressure, LAN discovery, PIN pairing + AES-256-GCM,
-desktop audio, UDP transport, 120 fps, and HEVC. Remaining Windows-only: real
-multi-touch injection (no public macOS API) and HDR (the virtual display's
-framebuffer is SDR — the known CGVirtualDisplay surface exposes no EDR
-capability; Windows gets HDR from its VDD driver).
+- **Stage E — GUI-less launcher settings.** The DMG launcher reads
+  `~/Library/Application Support/ExtendedDisplay/pairing.code` (exported as
+  `EXTDISPLAY_KEY` — Windows-GUI parity with its persisted code) and `options`
+  (extra MacHost args, e.g. `--audio --mute-local --fps 120`). Verified as a
+  complete packaged product: mount → launch → **encrypted video + encrypted
+  touch (pixel-exact) + encrypted audio in one session**, tablet auto-paired
+  from its saved key, clean stop.
+
+With that, the Mac host reaches **working parity with the Windows host for
+everything macOS can express**: native extended display (60/120 Hz), touch-back
+with S Pen pressure, LAN discovery, PIN pairing + AES-256-GCM on video/touch/
+audio over TCP and UDP, desktop audio, and H.264/HEVC. Remaining
+Windows-only, by platform limitation: real multi-touch injection (no public
+macOS API) and HDR (the virtual display's framebuffer is SDR — the known
+CGVirtualDisplay surface exposes no EDR capability; Windows gets HDR from its
+VDD driver). Also open: full eraser semantics (tablet proximity events) and a
+native settings GUI.
 
 ## v0.8.0 — 2026-07-02
 

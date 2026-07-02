@@ -109,10 +109,12 @@ Opt-in: streams stay open (today's behaviour) unless a pairing code is set, so a
 trusted home LAN needn't change. Encryption engages automatically once paired.
 
 **Mac host parity (v0.9.0):** the Mac sender implements the same pairing and
-encryption for the channels it has — **video** (`EXVE` marker + length-prefixed
-AES-GCM NALs, nonce prefix `0x01`) and **touch** (56-byte sealed v2 packets,
-nonce prefix `0x00`, monotonic-counter replay guard that rebases on a new nonce
-prefix so a tablet re-key doesn't stall). It has no desktop-audio channel yet,
-so there's nothing on `0x02` to encrypt. Verified on-device: correct code →
-video decodes and touch injects; wrong code → no video, touch auth-fails and is
+encryption on every channel — **video** over TCP (`EXVE` marker +
+length-prefixed AES-GCM NALs, nonce prefix `0x01`) and over UDP (sealed NALs
+behind the plaintext `EXUD` reassembly header), **touch** (56-byte sealed v2
+packets, nonce prefix `0x00`, monotonic-counter replay guard that rebases on a
+new nonce prefix so a tablet re-key doesn't stall), and **audio** (sealed PCM
+frames, nonce prefix `0x02`, plaintext 16-byte format header). Verified
+on-device: correct code → video decodes (both transports), touch injects,
+audio plays (`enc=true`); wrong code → no video, touch auth-fails and is
 dropped (no injection).

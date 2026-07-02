@@ -111,10 +111,11 @@ no public macOS API. Needs macOS Accessibility permission; disable with
 
 ## Desktop Audio (implemented, opt-in `--audio`)
 
-A third channel carries PC playback to the tablet. The Android app listens on TCP
-port `5003`; the host (WASAPI loopback of the default render endpoint) connects
-(over USB: `adb forward tcp:<local> tcp:5003`) and sends a one-time **plaintext
-format header**, then a stream of **length-prefixed packets**. All fields
+A third channel carries host playback to the tablet. The Android app listens on
+TCP port `5003`; the host — WASAPI loopback of the default render endpoint on
+Windows, ScreenCaptureKit system-audio capture on the Mac — connects (over USB:
+`adb forward tcp:<local> tcp:5003`) and sends a one-time **plaintext format
+header**, then a stream of **length-prefixed packets**. All fields
 **big-endian**:
 
 ```text
