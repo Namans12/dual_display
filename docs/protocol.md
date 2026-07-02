@@ -99,11 +99,14 @@ format header**, then a stream of **length-prefixed packets**. All fields
 **big-endian**:
 
 ```text
-Header (12 bytes, once per connection):
+Header (16 bytes, once per connection):
   uint32  magic         // 'EXAU' = 0x45584155
   uint32  sampleRate    // e.g. 48000
   uint16  channels      // 2
-  uint16  bitsPerSample // 16  (S16LE, interleaved)
+  uint8   bitsPerSample // 16  (S16LE, interleaved)
+  uint8   flags         // bit 0 = stream is AES-GCM encrypted
+  uint16  delayMs       // tablet AudioTrack buffer for A/V sync (--audio-delay-ms)
+  uint16  reserved      // 0
 
 Then, repeated:
   uint32  length        // bytes of payload that follow

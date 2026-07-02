@@ -11,7 +11,7 @@ Improvements (Wi-Fi robustness + usability + security + desktop audio).
   dedicated channel (TCP 5003; adb-forwarded on USB). The tablet plays it through
   an `AudioTrack` (newest-connection-wins, like touch). When encryption is on the
   audio is **AES-256-GCM** too (nonce prefix `0x02`, domain-separated from video
-  `0x01` / touch `0x00`); a 12-byte plaintext format header carries rate/channels
+  `0x01` / touch `0x00`); a 16-byte plaintext format header carries rate/channels
   and an "encrypted" flag so the tablet stays **silent until you pair** (no
   static-noise while typing the code). A 1-byte ACK handshake makes the sender wait
   for a live receiver, so audio survives the app-launch race (adb-forward accepts

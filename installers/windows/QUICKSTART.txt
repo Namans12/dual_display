@@ -31,7 +31,8 @@ RUN IT
 2. Pick your options:
       - Connection: USB (default) or Wi-Fi
       - Low-latency UDP: tick it for Wi-Fi if it feels laggy
-      - Touch, HDR, HEVC, FPS, bitrate as desired
+      - Quality: Best resolution / Balanced / Smooth motion (120 fps)
+      - Touch, HDR, HEVC as desired (hover the i markers for details)
       - Desktop audio: play the PC's sound on the tablet. Sub-options:
           * Mute PC speakers  = sound comes only from the tablet
           * A/V sync delay (ms) = nudge if audio/video drift (default 40)

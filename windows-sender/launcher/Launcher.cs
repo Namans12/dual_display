@@ -103,7 +103,9 @@ namespace ExtendedDisplay
             var iDelay = Info(157, "Audio delay for lip-sync (ms). Higher = audio plays later; lower it if audio lags the video. ~40 matches the tablet's own video; ~20 for watching the laptop with the tablet as a speaker.", numDelay);
             chkAudio.CheckedChanged += (s, e) => {
                 chkMute.Enabled = chkAudio.Checked; numDelay.Enabled = chkAudio.Checked;
-                lblDelay.Enabled = chkAudio.Checked; iMute.Enabled = iDelay.Enabled = chkAudio.Checked;
+                lblDelay.Enabled = chkAudio.Checked;
+                // The i markers stay enabled: tooltips never show over disabled
+                // controls, and the descriptions should be readable before enabling.
                 if (!chkAudio.Checked) chkMute.Checked = false;
             };
             chkEncrypt = new CheckBox { Text = "Encrypt", Location = new Point(12, 184), AutoSize = true };
@@ -115,7 +117,7 @@ namespace ExtendedDisplay
 
             // ── Pairing code + status + buttons ───────────────────────────
             lblCode = new Label { Text = "", Location = new Point(14, 442), Size = new Size(374, 22), ForeColor = Color.MediumBlue, Font = new Font("Consolas", 11f, FontStyle.Bold) };
-            lblStatus = new Label { Text = "Ready.", Location = new Point(14, 466), Size = new Size(374, 20), ForeColor = Color.DimGray };
+            lblStatus = new Label { Text = "Ready.", Location = new Point(14, 466), Size = new Size(374, 20), ForeColor = Color.DimGray, AutoEllipsis = true };
             btnStart = new Button { Text = "Start Streaming", Location = new Point(12, 494), Size = new Size(182, 38), BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
             btnStart.FlatAppearance.BorderSize = 0;
             btnStop = new Button { Text = "Stop", Location = new Point(206, 494), Size = new Size(182, 38), Enabled = false };
@@ -339,10 +341,27 @@ namespace ExtendedDisplay
                 sender.ErrorDataReceived  += (s2, ev) => { if (ev.Data != null) OnSenderLine(ev.Data); };
                 sender.BeginOutputReadLine();
                 sender.BeginErrorReadLine();
-                sender.Exited += (s2, e2) => BeginInvoke((Action)(() =>
+                sender.Exited += (s2, e2) =>
                 {
-                    if (btnStop.Enabled) { SetStatus("Sender exited.", Color.DimGray); btnStart.Enabled = true; btnStop.Enabled = false; }
-                }));
+                    // Fires on a threadpool thread; during close the handle may be
+                    // gone — guard like OnSenderLine or BeginInvoke throws and the
+                    // unhandled exception kills the process.
+                    try
+                    {
+                        if (!IsHandleCreated || IsDisposed) return;
+                        BeginInvoke((Action)(() =>
+                        {
+                            if (btnStop.Enabled)
+                            {
+                                SetStatus("Sender exited.", Color.DimGray);
+                                btnStart.Enabled = true;
+                                btnStop.Enabled = false;
+                                DisableVdd();  // don't leave a ghost display with Stop greyed out
+                            }
+                        }));
+                    }
+                    catch (InvalidOperationException) { /* form torn down mid-notify */ }
+                };
                 SetStatus("Starting…  (" + liveMode + ")", Color.Green);
                 btnStop.Enabled = true;
             }

@@ -41,7 +41,7 @@ Goals: (a) only a **paired** tablet can connect/control, (b) the streams are
     connects to the tablet directly; encryption requires the sender to sit in the
     middle, like the UDP path already does).
 - **Audio (TCP 5003):** encrypt each captured PCM packet. Nonce prefix `0x02`
-  domain-separates audio from video (`0x01`) and touch (`0x00`). The 12-byte
+  domain-separates audio from video (`0x01`) and touch (`0x00`). The 16-byte
   format header (sample rate / channels) stays plaintext — it carries no secret.
 - Platform crypto only, no third-party deps: **Windows BCrypt** (PBKDF2 + AES-GCM)
   on the sender; **javax.crypto** (`PBKDF2WithHmacSHA256`, `AES/GCM/NoPadding`) on

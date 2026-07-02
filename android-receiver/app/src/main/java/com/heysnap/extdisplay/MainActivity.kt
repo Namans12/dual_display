@@ -80,7 +80,10 @@ private object Crypto {
  */
 private class Sealer(key: ByteArray) {
     private val keySpec = SecretKeySpec(key, "AES")
-    private val prefix = ByteArray(4).also { SecureRandom().nextBytes(it) }
+    // prefix[0]=0x00 domain-separates tablet->PC touch nonces from the sender's
+    // video (0x01) and audio (0x02) streams under the shared key — a random byte 0
+    // could collide with a sender prefix and reuse nonces across channels.
+    private val prefix = ByteArray(4).also { SecureRandom().nextBytes(it); it[0] = 0 }
     private var counter = 0L
 
     @Synchronized fun seal(plain: ByteArray): ByteArray {
