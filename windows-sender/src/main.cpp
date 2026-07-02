@@ -177,7 +177,7 @@ struct Options {
     bool udp = false;            // low-latency UDP video (needs --wifi or --host)
     bool audio = false;          // stream desktop audio (WASAPI loopback) to the tablet
     bool muteLocal = false;      // mute the PC's own speakers while streaming audio
-    int audioDelayMs = 55;       // tablet audio buffer/latency for A/V sync (bigger = later)
+    int audioDelayMs = 40;       // tablet audio buffer/latency for A/V sync (bigger = later)
     bool listDisplays = false;
 };
 
@@ -1671,7 +1671,7 @@ void printUsage() {
         "  --no-touch        Disable tablet touch -> mouse injection\n"
         "  --audio           Stream desktop audio (PC playback) to the tablet\n"
         "  --mute-local      With --audio: mute the PC's own speakers (tablet only)\n"
-        "  --audio-delay-ms N  Tablet audio buffer for A/V sync (default 55; higher=later)\n"
+        "  --audio-delay-ms N  Tablet audio buffer for A/V sync (default 40; higher=later)\n"
         "  --wifi            Stream over Wi-Fi: auto-discover the tablet on the LAN\n"
         "  --udp             Low-latency UDP video over Wi-Fi (needs --wifi or --host)\n"
         "  --host IP         Advanced: stream straight to IP (WiFi), skip adb\n"

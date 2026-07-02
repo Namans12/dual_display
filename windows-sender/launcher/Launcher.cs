@@ -88,7 +88,7 @@ namespace ExtendedDisplay
             chkAudio = new CheckBox { Text = "Desktop audio  (PC sound plays on the tablet)", Location = new Point(12, 100), AutoSize = true };
             chkMute = new CheckBox { Text = "› Mute PC speakers  (sound only on the tablet)", Location = new Point(30, 126), AutoSize = true, Enabled = false };
             var lblDelay = new Label { Text = "› A/V sync delay (ms):", Location = new Point(30, 155), AutoSize = true, Enabled = false };
-            numDelay = new NumericUpDown { Location = new Point(178, 152), Width = 62, Minimum = 20, Maximum = 500, Value = 55, Increment = 5, Enabled = false };
+            numDelay = new NumericUpDown { Location = new Point(178, 152), Width = 62, Minimum = 20, Maximum = 500, Value = 40, Increment = 5, Enabled = false };
             chkAudio.CheckedChanged += (s, e) => {
                 chkMute.Enabled = chkAudio.Checked; numDelay.Enabled = chkAudio.Checked; lblDelay.Enabled = chkAudio.Checked;
                 if (!chkAudio.Checked) chkMute.Checked = false;
