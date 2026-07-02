@@ -177,6 +177,7 @@ struct Options {
     bool udp = false;            // low-latency UDP video (needs --wifi or --host)
     bool audio = false;          // stream desktop audio (WASAPI loopback) to the tablet
     bool muteLocal = false;      // mute the PC's own speakers while streaming audio
+    int audioDelayMs = 55;       // tablet audio buffer/latency for A/V sync (bigger = later)
     bool listDisplays = false;
 };
 
@@ -1362,7 +1363,7 @@ void restoreLocalMuteIfNeeded() {
 }
 
 void runAudioBridge(const std::string adb, const std::string host, int localPort,
-                    bool adbMode, bool muteLocal) {
+                    bool adbMode, bool muteLocal, int audioDelayMs) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
 
     IMMDeviceEnumerator* enumr = nullptr;
@@ -1453,19 +1454,23 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
         if (enc) BCryptGenRandom(nullptr, aPrefix + 1, 3, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
         uint64_t aCtr = 0;
 
-        // Header: [4 magic][4 rate][2 channels][1 bits][1 flags]. flags bit0 =
-        // encrypted, so the tablet stays silent until paired (else it would play
-        // the encrypted bytes as raw PCM = white noise while you type the code).
-        unsigned char hdr[12] = {
+        // Header: [4 magic][4 rate][2 channels][1 bits][1 flags][2 delayMs][2 rsvd].
+        // flags bit0 = encrypted, so the tablet stays silent until paired (else it
+        // would play the encrypted bytes as raw PCM = white noise while you type the
+        // code). delayMs is the tablet's audio buffer/latency for A/V sync.
+        const int dms = audioDelayMs < 0 ? 0 : (audioDelayMs > 1000 ? 1000 : audioDelayMs);
+        unsigned char hdr[16] = {
             static_cast<unsigned char>(kAudioMagic >> 24), static_cast<unsigned char>(kAudioMagic >> 16),
             static_cast<unsigned char>(kAudioMagic >> 8),  static_cast<unsigned char>(kAudioMagic),
             static_cast<unsigned char>(sampleRate >> 24),  static_cast<unsigned char>(sampleRate >> 16),
             static_cast<unsigned char>(sampleRate >> 8),   static_cast<unsigned char>(sampleRate),
             0, 2,   // channels = 2
             16,     // bits = 16
-            static_cast<unsigned char>(enc ? 1 : 0)  // flags: bit0 = encrypted
+            static_cast<unsigned char>(enc ? 1 : 0),  // flags: bit0 = encrypted
+            static_cast<unsigned char>(dms >> 8), static_cast<unsigned char>(dms),  // delayMs (BE)
+            0, 0    // reserved
         };
-        if (!sendAll(sock, hdr, 12)) { closesocket(sock); sleepInterruptible(1000); continue; }
+        if (!sendAll(sock, hdr, 16)) { closesocket(sock); sleepInterruptible(1000); continue; }
 
         // Wait for the tablet's 1-byte ACK. adb-forward accepts our local socket even
         // before the app has bound its port (startup race), so a successful connect()
@@ -1666,6 +1671,7 @@ void printUsage() {
         "  --no-touch        Disable tablet touch -> mouse injection\n"
         "  --audio           Stream desktop audio (PC playback) to the tablet\n"
         "  --mute-local      With --audio: mute the PC's own speakers (tablet only)\n"
+        "  --audio-delay-ms N  Tablet audio buffer for A/V sync (default 55; higher=later)\n"
         "  --wifi            Stream over Wi-Fi: auto-discover the tablet on the LAN\n"
         "  --udp             Low-latency UDP video over Wi-Fi (needs --wifi or --host)\n"
         "  --host IP         Advanced: stream straight to IP (WiFi), skip adb\n"
@@ -1726,6 +1732,8 @@ Options parseArgs(int argc, char** argv) {
             options.audio = false;
         } else if (arg == "--mute-local") {
             options.muteLocal = true;
+        } else if (arg == "--audio-delay-ms") {
+            options.audioDelayMs = readInt(requireValue("--audio-delay-ms"), "--audio-delay-ms");
         } else if (arg == "--wifi") {
             options.wifi = true;
         } else if (arg == "--udp") {
@@ -2374,7 +2382,7 @@ int main(int argc, char** argv) {
 
         if (options.audio) {
             std::thread(runAudioBridge, adb, options.host, options.port + 3,
-                        options.host.empty(), options.muteLocal)
+                        options.host.empty(), options.muteLocal, options.audioDelayMs)
                 .detach();
             std::cout << "Desktop audio bridge active (PC audio plays on the tablet).\n";
         }

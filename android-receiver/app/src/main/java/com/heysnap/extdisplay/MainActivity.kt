@@ -966,17 +966,24 @@ private class AudioReceiver {
         var track: AudioTrack? = null
         try {
             val inp = java.io.DataInputStream(java.io.BufferedInputStream(sock.getInputStream()))
-            val hdr = ByteArray(12)
+            val hdr = ByteArray(16)
             inp.readFully(hdr)
             if (beInt(hdr, 0) != AUDIO_MAGIC) return
             val rate = beInt(hdr, 4)
             val channels = beShort(hdr, 8)
             val encrypted = (hdr[11].toInt() and 1) != 0  // stream is AES-GCM per frame
+            val delayMs = ((hdr[12].toInt() and 0xff) shl 8) or (hdr[13].toInt() and 0xff)
             if (rate !in 8000..192000) return
             val mask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO
                        else AudioFormat.CHANNEL_OUT_MONO
             val minBuf = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT)
             if (minBuf <= 0) return
+            // The AudioTrack buffer sets the audio latency, so it's the A/V-sync knob:
+            // bigger = audio plays later (raise it if audio leads the video). The PC's
+            // "Audio delay (ms)" field drives it; floor at minBuf so it never underruns.
+            // (blocking write() paces us; LOW_LATENCY perf mode threw build() here.)
+            val bytesPerMs = rate * 4 / 1000   // stereo 16-bit = 4 bytes/frame
+            val bufBytes = maxOf(minBuf, (delayMs * bytesPerMs / 4) * 4)
             track = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -987,11 +994,7 @@ private class AudioReceiver {
                     .setSampleRate(rate)
                     .setChannelMask(mask)
                     .build())
-                // Buffer ~= the video pipeline latency so audio and video line up:
-                // minBuf led the video (audio early), minBuf*2 lagged it, so aim for
-                // the midpoint (~1.5x, frame-aligned). blocking write() paces us; the
-                // LAN keeps it fed. (LOW_LATENCY perf mode made build() throw here.)
-                .setBufferSizeInBytes(((minBuf * 3 / 2) / 4) * 4)
+                .setBufferSizeInBytes(bufBytes)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             track.play()
