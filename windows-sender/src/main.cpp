@@ -1406,13 +1406,20 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
     // Optionally silence the PC's own speakers so sound only comes from the tablet.
     // Loopback still captures the full mix while muted (verified), so the tablet
     // keeps its audio. A marker file lets the next launch un-mute if we're killed.
+    // Keep the endpoint-volume handle open: pressing Volume Up/Down un-mutes the
+    // endpoint (Windows behaviour), so we re-assert the mute periodically below.
+    IAudioEndpointVolume* epv = nullptr;
     bool didMute = false;
-    if (muteLocal && setEndpointMute(true)) {
+    if (muteLocal &&
+        SUCCEEDED(dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void**>(&epv))) &&
+        SUCCEEDED(epv->SetMute(TRUE, nullptr))) {
         didMute = true;
         FILE* mf = nullptr;
         if (fopen_s(&mf, muteMarkerPath().c_str(), "w") == 0 && mf) fclose(mf);
         std::cout << "Desktop audio: PC speakers muted (sound plays on the tablet only).\n";
     }
+    ULONGLONG lastRemute = GetTickCount64();
 
     const std::string connectHost = adbMode ? "127.0.0.1" : host;
     const int connectPort = adbMode ? localPort : kRemoteAudioPort;
@@ -1481,6 +1488,15 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
         client->Start();
         bool alive = true;
         while (!g_stop.load() && alive) {
+            // Re-assert the mute if the user's volume keys un-muted the endpoint.
+            if (didMute) {
+                const ULONGLONG now = GetTickCount64();
+                if (now - lastRemute > 500) {
+                    lastRemute = now;
+                    BOOL m = FALSE;
+                    if (SUCCEEDED(epv->GetMute(&m)) && !m) epv->SetMute(TRUE, nullptr);
+                }
+            }
             UINT32 packetLen = 0;
             if (FAILED(capture->GetNextPacketSize(&packetLen))) break;
             if (packetLen == 0) { sleepInterruptible(5); continue; }
@@ -1525,10 +1541,11 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
         if (!g_stop.load()) sleepInterruptible(1000);
     }
     if (didMute) {
-        setEndpointMute(false);
+        epv->SetMute(FALSE, nullptr);
         DeleteFileA(muteMarkerPath().c_str());
         std::cout << "Desktop audio: PC speakers un-muted.\n";
     }
+    if (epv) epv->Release();
     cleanup();
     WSACleanup();
     CoUninitialize();

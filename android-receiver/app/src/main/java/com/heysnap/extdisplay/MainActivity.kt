@@ -987,11 +987,11 @@ private class AudioReceiver {
                     .setSampleRate(rate)
                     .setChannelMask(mask)
                     .build())
-                // Small buffer so audio doesn't lag the video; blocking write() still
-                // paces us and the LAN can keep it fed. (LOW_LATENCY perf mode was
-                // tried but made build() throw on this device — dropped.) Bump toward
-                // minBuf*2 if a device underruns/glitches.
-                .setBufferSizeInBytes(minBuf)
+                // Buffer ~= the video pipeline latency so audio and video line up:
+                // minBuf led the video (audio early), minBuf*2 lagged it, so aim for
+                // the midpoint (~1.5x, frame-aligned). blocking write() paces us; the
+                // LAN keeps it fed. (LOW_LATENCY perf mode made build() throw here.)
+                .setBufferSizeInBytes(((minBuf * 3 / 2) / 4) * 4)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             track.play()
