@@ -46,6 +46,46 @@ tablet keeps its audio — the only no-extra-driver way to get "sound follows to
 tablet." `--mute-local` (GUI: "Mute PC speakers") does this, restoring on exit and
 self-healing a stuck mute via a marker file if the sender is force-killed.
 
+**A/V sync knob + wireless-speaker setups.** Sync is one-directional: **anything
+played on the tablet has an irreducible latency** (network + decode + AudioTrack
+buffer, ~40–60 ms). We can *add* delay to a stream but can't *remove* the tablet's
+lag or delay the laptop's own local playback (that needs an audio driver). So sync =
+delay everything to match the slowest thing you're actually watching. The GUI
+"A/V sync delay (ms)" field (`--audio-delay-ms`, sizes the tablet AudioTrack buffer)
+is the knob; set it per use case:
+
+- **Watching the TABLET (extended display) + tablet audio** — the default. The
+  tablet's *video* is itself pipeline-delayed, and audio is tuned to match it, so
+  they line up. Verified sweet spot on the S9U: **~40 ms** (bracketed 35–40).
+- **Watching the LAPTOP + tablet as a wireless speaker** — set the delay to the
+  **minimum (~20)** and tick "Mute PC speakers". The tablet audio then trails the
+  laptop's instant video by ~50 ms (the tablet floor). For tight lip-sync, add a
+  matching offset in the player (e.g. VLC → Tools → Track Synchronization → delay
+  the *video* ~50 ms). No driver. This is the clean immersive setup.
+- **Dual-speaker (laptop video + BOTH laptop & tablet)** — needs a virtual audio
+  cable, documented below.
+
+**Dual-speaker sync (laptop + tablet in unison) — needs a virtual cable (future).**
+The laptop's video + its own speakers are already perfectly in sync (both local);
+the tablet joins ~50 ms late → a slap-back echo. To make both speaker sets play in
+unison you must **delay ONLY the laptop's local output** by ~the tablet's latency,
+while the tablet keeps the *undelayed* feed. Windows can't do a one-branch delay
+without extra software, and note the trap: a system-wide APO delay (e.g. Equalizer
+APO's Delay filter on the endpoint) delays the loopback capture *too*, so both move
+together and the relative offset is unchanged — useless here. The delay has to be on
+the laptop-monitor branch only. Recipe (free, one-time, outside plug-and-play):
+1. Install a virtual cable (VB-Audio Cable) + a router with a per-bus delay
+   (VoiceMeeter Banana/Potato).
+2. Route apps → VoiceMeeter virtual input. Send it to two outputs: (a) the physical
+   laptop speakers **with a ~50 ms bus delay**, and (b) a virtual output/cable with
+   **no delay** that becomes the *default render endpoint*.
+3. Point the sender at that default endpoint (it loopback-captures it automatically)
+   → the tablet gets the undelayed audio; the laptop speakers get the delayed copy,
+   so the two speaker sets align.
+4. If you're watching on the laptop, also offset the player video to match both.
+For most cases the tablet-only setup (minimum delay + Mute PC speakers) is the
+cleaner immersive experience, which is why the cable route is documented, not built.
+
 ## Encrypted video showed no picture until reconnect — 'EXVE' marker
 
 The tablet's TCP video loop chose encrypted-vs-plaintext framing **once**, when it

@@ -1,8 +1,8 @@
 # Changelog
 
-## v0.8.0 — in progress
+## v0.8.0 — 2026-07-02
 
-Improvements (Wi-Fi robustness + usability + security).
+Improvements (Wi-Fi robustness + usability + security + desktop audio).
 
 - **Desktop audio (PC → tablet).** New opt-in "Desktop audio" checkbox (CLI:
   `--audio`) streams whatever the PC is playing to the tablet's speakers. The

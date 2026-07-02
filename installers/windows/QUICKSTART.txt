@@ -1,0 +1,59 @@
+EXTENDED DISPLAY — Quick Start
+==============================
+
+Turn a Samsung Galaxy Tab S9 Ultra (or any Android tablet) into a true extended
+second monitor for this Windows PC — native 2960x1848, 120 Hz, over USB-C or Wi-Fi,
+with touch and S Pen controlling the PC.
+
+--------------------------------------------------------------------
+ONE-TIME SETUP (per PC)
+--------------------------------------------------------------------
+1. Right-click  Install-Driver.bat  ->  "Run as administrator"
+   (or just double-click it and approve the UAC prompt).
+   This installs the virtual display driver. Do this ONCE per PC.
+
+   -> Reboot once after this first install (recommended, so the driver
+      loads its 2960x1848 resolution list).
+
+--------------------------------------------------------------------
+INSTALL THE TABLET APP
+--------------------------------------------------------------------
+USB:   Plug the tablet in (USB-C), enable USB debugging on the tablet,
+       and just run ExtendedDisplay.exe -> it installs the app automatically.
+
+Wi-Fi only (no USB debugging): copy ExtendedDisplayReceiver.apk to the tablet
+       and tap it to install (allow "install from this source"). Open the app.
+
+--------------------------------------------------------------------
+RUN IT
+--------------------------------------------------------------------
+1. Double-click  ExtendedDisplay.exe   (approve the UAC prompt).
+2. Pick your options:
+      - Connection: USB (default) or Wi-Fi
+      - Low-latency UDP: tick it for Wi-Fi if it feels laggy
+      - Touch, HDR, HEVC, FPS, bitrate as desired
+      - Desktop audio: play the PC's sound on the tablet. Sub-options:
+          * Mute PC speakers  = sound comes only from the tablet
+          * A/V sync delay (ms) = nudge if audio/video drift (default 40)
+      - Encrypt: mint a pairing code (shown in the GUI). Type it once on
+        the tablet to encrypt video + touch + audio (for untrusted Wi-Fi).
+3. Click  Start Streaming.
+   - USB: make sure the tablet is plugged in with USB debugging on.
+   - Wi-Fi: make sure the PC and tablet are on the SAME network and the
+     app is open on the tablet.
+   - If you ticked Encrypt: type the shown code on the tablet; video +
+     audio start once it's paired.
+4. Click  Stop  when done — the virtual display disappears cleanly.
+
+--------------------------------------------------------------------
+NOTES
+--------------------------------------------------------------------
+- Touch works like a touchscreen: tap = click, drag = move/scroll. Tap
+  directly on windows/icons shown on the tablet.
+- Colours are SDR by default (correct for desktop). Use the HDR option only
+  for HDR video content.
+- Wi-Fi latency is mostly your network: 5 GHz + close to the router is best.
+- To remove the driver later: right-click uninstall-vdd.ps1 -> Run with
+  PowerShell (as admin), or just run it from an elevated PowerShell.
+
+See INSTALL.md (in the project) for full details and troubleshooting.
