@@ -166,8 +166,11 @@ final class TcpWriter {
         }
 
         guard connected else {
+            let reason = String(cString: strerror(errno))
             close(fd)
-            throw MacHostError.socket("Could not connect to \(host):\(port)")
+            // "No route to host" on a LAN peer usually means macOS Local Network
+            // privacy (System Settings > Privacy & Security > Local Network).
+            throw MacHostError.socket("Could not connect to \(host):\(port) — \(reason)")
         }
     }
 
@@ -443,14 +446,35 @@ func parkUntilSignal() async {
 
 @main
 struct MacHostMain {
+    // Retries until the tablet listener is reachable: covers the receiver-app
+    // launch race, brief rebind gaps between sessions, and the one-time macOS
+    // Local Network permission grant (first Wi-Fi run).
+    static func connectWithRetry(host: String, port: Int) async -> TcpWriter {
+        var announced = false
+        while true {
+            do {
+                return try TcpWriter(host: host, port: port)
+            } catch {
+                if !announced {
+                    print("Tablet not reachable (\(error)); retrying every 2s — " +
+                          "is the app open on the tablet? Over Wi-Fi, also allow this " +
+                          "app under System Settings > Privacy & Security > Local Network.")
+                    announced = true
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
     static func main() async {
+        setvbuf(stdout, nil, _IOLBF, 0)  // line-buffered: Finder launches log to a file
         do {
             let options = try parseOptions(CommandLine.arguments)
             print("Connecting to \(options.host):\(options.port)")
             print("Capture: ScreenCaptureKit display \(options.displayIndex)")
             print("Encode: H.264 VideoToolbox, \(options.width)x\(options.height) @ \(options.fps) FPS")
 
-            let writer = try TcpWriter(host: options.host, port: options.port)
+            let writer = await connectWithRetry(host: options.host, port: options.port)
             let encoder = try H264AnnexBEncoder(options: options, writer: writer)
             let host = ScreenCaptureHost(options: options, encoder: encoder)
             try await host.start()

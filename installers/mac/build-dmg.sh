@@ -29,6 +29,9 @@ if [[ -z "$APK" || ! -f "$APK" ]]; then
     echo "error: receiver APK not found; build it (gradlew :app:assembleRelease) or pass its path" >&2
     exit 1
 fi
+# Absolute path: the build cd's into mac-host/ below, which would break a
+# relative APK argument at the copy step.
+APK="$(cd "$(dirname "$APK")" && pwd)/$(basename "$APK")"
 
 # 2. Build MacHost
 echo "Building MacHost (release)..."

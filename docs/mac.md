@@ -32,13 +32,20 @@ on its own once video starts.
 ## Requirements
 
 - macOS **13 (Ventura) or newer** (ScreenCaptureKit; `Package.swift` targets
-  `.v13`).
+  `.v13`). Verified on macOS 26 (Apple silicon).
 - Xcode Command Line Tools (`xcode-select --install`) for `swift build`.
 - The receiver app on the tablet — sideload `ExtendedDisplayReceiver.apk`, or
   let the DMG launcher install it over USB (needs USB debugging enabled).
 - **Screen Recording permission**: macOS prompts on first capture
   (System Settings → Privacy & Security → Screen Recording). Until granted,
-  capture starts but delivers black frames.
+  capture fails with a TCC error (`SCStreamErrorDomain -3801`) or delivers
+  black frames.
+- **Local Network permission** (Wi-Fi only, macOS 15+): the first LAN connect
+  prompts; if it was dismissed, toggle the app that launches MacHost (Terminal,
+  ExtendedDisplay.app, …) under System Settings → Privacy & Security → Local
+  Network. Until granted, LAN connects fail with *No route to host* — MacHost
+  keeps retrying every 2 s, so granting it mid-run recovers on its own. USB
+  (127.0.0.1) is exempt.
 
 ## Quick start — packaged (.dmg, USB automated)
 
@@ -58,8 +65,8 @@ platform-tools, ad-hoc signs the bundle, and emits
 First run: right-click → **Open** (ad-hoc signature), grant Screen Recording.
 The launcher logs to `~/Library/Logs/ExtendedDisplay.log`.
 
-> The packaging script is authored and syntax-checked but has not been executed
-> on a Mac from this repo — report anything that fails.
+> Verified end-to-end on macOS 26 (Apple silicon): build → mount → launcher →
+> adb forward → streaming, receiver v9.
 
 ## Quick start — manual build / run
 
@@ -118,8 +125,18 @@ tablet letterboxes automatically).
 
 - **Black video on the tablet** → Screen Recording permission not granted;
   grant it and relaunch MacHost.
+- **`Could not connect … — No route to host` over Wi-Fi** → macOS Local
+  Network permission (see Requirements). MacHost retries every 2 s and
+  recovers as soon as it's granted.
 - **`Could not connect to <ip>:5000`** → app not open on the tablet, wrong IP,
   or different network. Over USB: re-run `adb forward tcp:5000 tcp:5000`.
+  MacHost keeps retrying every 2 s until the listener appears.
+- **"Streaming." but the tablet stays on "Waiting…" (USB)** → the adb forward
+  isn't in place, and macOS's **AirPlay Receiver** (Control Center) also
+  listens on port 5000 — so MacHost's connect *succeeds* against the wrong
+  listener and streams into it. Re-run `adb forward tcp:5000 tcp:5000` (the
+  forward's specific 127.0.0.1 bind takes precedence over AirPlay's wildcard
+  bind, so both can coexist).
 - **App stays on "Waiting…"** → MacHost isn't reaching the tablet — verify with
   `nc -vz <tablet-ip> 5000`.
 - **Choppy / lagging** → lower `--fps` (30) or `--bitrate`; the TCP write runs

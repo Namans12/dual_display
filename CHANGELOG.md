@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.9.0 — 2026-07-03 (in progress)
+
+Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
+(Apple silicon, M4) against receiver v9 on a Galaxy Tab S9 Ultra.
+
+- **Stage 1 — existing host + DMG verified on a real Mac (USB + Wi-Fi).**
+  - USB (`adb forward` + `--host 127.0.0.1`) streaming verified end-to-end
+    (tablet decodes H.264 at 60 works/s). Wi-Fi (`--host <tablet-ip>`)
+    exercised to the macOS Local Network permission gate; on this machine the
+    deny surfaced as instant `EHOSTUNREACH` while Apple-signed tools connected
+    fine — hence the retry+errno fixes below.
+  - Fixed: `RunLoop.run()` (unavailable from async contexts — Swift 6) replaced
+    with a SIGINT/SIGTERM-driven lifetime; clean "Stopping." teardown verified.
+  - Fixed: one-shot connect → **retry every 2 s** until the tablet listener is
+    reachable (covers the app-launch race, session rebind gaps, and the one-time
+    macOS **Local Network** grant). Socket errors now include errno text.
+  - Fixed: stdout is line-buffered so Finder launches actually log to
+    `~/Library/Logs/ExtendedDisplay.log` in real time.
+  - `build-dmg.sh` executed for the first time on a real Mac; fixed the missing
+    executable bit and a relative-APK-path break (the build `cd`s into
+    `mac-host/`). DMG verified: mount → launcher → adb forward → app launch →
+    streaming, `codesign -v --deep` clean.
+  - Docs: macOS 15+ Local Network permission requirement (Wi-Fi), AirPlay
+    Receiver-on-:5000 gotcha (a missing adb forward "connects" anyway and video
+    goes nowhere), updated troubleshooting.
+
 ## v0.8.0 — 2026-07-02
 
 Improvements (Wi-Fi robustness + usability + security + desktop audio).
