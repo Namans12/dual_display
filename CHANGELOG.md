@@ -52,6 +52,29 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
     size (matching the Windows sender), so the virtual display streams
     pixel-perfect without flags.
 
+- **Stage 3 — touch-back (tablet → Mac).** The host connects to the tablet's
+  touch port (5001), parses the **28-byte protocol-v2** packets (big-endian
+  `HXTP`, normalized coords, pressure, tool type incl. stylus/eraser, hover),
+  and injects the Mac cursor via `CGEvent` posted to the HID tap: down/up →
+  left-button press (taps click, quick repeats double-click via manual
+  click-state), move → drag, S Pen hover → cursor move. Single-pointer for now
+  (stylus/eraser ride the mouse path; real pen/pressure is a later milestone).
+  `--no-touch` disables it.
+  - Reconnects forever with a 2 s backoff (like the Windows bridge) and
+    resyncs on the packet magic after a mid-stream connect; releases a stuck
+    button if the tablet drops mid-drag.
+  - Needs macOS **Accessibility** permission (CGEvent injection silently
+    no-ops without it — surfaced with the system prompt at start).
+  - USB adds `adb forward tcp:5001 tcp:5001` (the DMG launcher now does this);
+    Wi-Fi connects to the tablet's :5001 directly. Verified on-device: tablet
+    taps land pixel-exact on the computed display coordinate (center →
+    2209.5,461.5; 0.1,0.1 → 1617.9,92.3), drags track exactly.
+  - New `--selftest` runs pure-logic protocol tests (touch v2 parse, golden
+    vector byte-matched to the receiver's writer) — the CLT-only-Mac stand-in
+    for the Windows `--crypto-selftest` (no XCTest available).
+  - docs/protocol.md touch section corrected to protocol v2 (was documented as
+    the retired 24-byte v1).
+
 ## v0.8.0 — 2026-07-02
 
 Improvements (Wi-Fi robustness + usability + security + desktop audio).

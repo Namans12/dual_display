@@ -17,7 +17,7 @@ native virtual display (CGVirtualDisplay, 2960x1848@60 HiDPI)
 | Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264, TCP only |
 | Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848@60 HiDPI (default) |
 | Tablet discovery | ✅ UDP broadcast | ➖ manual `--host <ip>` (or USB adb forward) |
-| Touch / S Pen → host | ✅ | ❌ (tablet is display-only) |
+| Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse (stylus rides the mouse path) |
 | Desktop audio → tablet | ✅ | ❌ |
 | PIN pairing + AES-256-GCM encryption | ✅ all channels | ❌ (stream is plaintext) |
 | 120 fps mode switch, HDR | ✅ | ❌ (fixed capture size, SDR) |
@@ -25,9 +25,9 @@ native virtual display (CGVirtualDisplay, 2960x1848@60 HiDPI)
 
 The current receiver app (versionCode 9) stays fully compatible with the Mac
 host: a plaintext TCP stream has no `EXVE` marker, so the app feeds it straight
-to its Annex-B splitter and decodes. Tablet touches simply go nowhere (nothing
-connects to the touch port), and the pairing box can be ignored — it tucks away
-on its own once video starts.
+to its Annex-B splitter and decodes. Tablet touches now drive the Mac cursor
+(the host connects to the tablet's touch port), and the pairing box can be
+ignored — it tucks away on its own once video starts.
 
 ## Requirements
 
@@ -40,6 +40,10 @@ on its own once video starts.
   (System Settings → Privacy & Security → Screen Recording). Until granted,
   capture fails with a TCC error (`SCStreamErrorDomain -3801`) or delivers
   black frames.
+- **Accessibility permission** (for touch-back): macOS prompts on first launch
+  with touch enabled (System Settings → Privacy & Security → Accessibility).
+  Until granted, `CGEvent` injection silently no-ops — tablet touches won't
+  move the cursor. Grant the app that launches MacHost, then relaunch.
 - **Local Network permission** (Wi-Fi only, macOS 15+): the first LAN connect
   prompts; if it was dismissed, toggle the app that launches MacHost (Terminal,
   ExtendedDisplay.app, …) under System Settings → Privacy & Security → Local
@@ -155,9 +159,9 @@ keep the aspect ratio — the tablet letterboxes automatically.
 ## Limitations (honest)
 
 - H.264 only (HEVC needs codec negotiation the Mac phase never grew).
-- Video-only: no touch-back, no audio, no encryption, no discovery — those live
-  in the Windows host (see [SECURITY.md](../SECURITY.md) and the README feature
-  table).
+- Touch is single-pointer mouse (no real multi-touch or pen pressure yet); no
+  audio, no encryption, no discovery — those live in the Windows host (see
+  [SECURITY.md](../SECURITY.md) and the README feature table).
 - The idle virtual display persists (parked) until logout or
   `--remove-display` — macOS offers no per-display removal (verified: object
   release, process death and empty-mode applySettings can all leave it online).

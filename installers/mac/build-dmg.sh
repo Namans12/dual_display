@@ -91,11 +91,17 @@ command -v adb >/dev/null 2>&1 && ADB="$(command -v adb)"
 echo "Waiting for tablet over USB (enable USB debugging)..."
 until [[ "$("$ADB" get-state 2>/dev/null)" == "device" ]]; do sleep 2; done
 
-if ! "$ADB" shell pm path com.heysnap.extdisplay | grep -q package:; then
-    echo "Installing receiver app..."
+# Install the receiver if missing, or update it when older than the version
+# this host needs (v9: touch server re-accepts a reconnecting host immediately).
+REQUIRED_APP_VERSION=9
+INSTALLED=$("$ADB" shell dumpsys package com.heysnap.extdisplay 2>/dev/null \
+    | sed -n 's/.*versionCode=\([0-9]*\).*/\1/p' | head -1)
+if [[ -z "$INSTALLED" || "$INSTALLED" -lt "$REQUIRED_APP_VERSION" ]]; then
+    echo "Installing receiver app (installed: ${INSTALLED:-none})..."
     "$ADB" install -r "$RES/ExtendedDisplayReceiver.apk"
 fi
 "$ADB" forward tcp:5000 tcp:5000
+"$ADB" forward tcp:5001 tcp:5001    # touch uplink (tablet -> Mac input)
 "$ADB" shell am start -n com.heysnap.extdisplay/.MainActivity
 sleep 1.5
 

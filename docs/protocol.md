@@ -72,23 +72,40 @@ tablet's IP over TCP (video `5000`, touch `5001`), the same path as `--host`.
 
 A second TCP channel carries touches back to the host. The Android app listens
 on port `5001`; the host connects (over USB: `adb forward tcp:<local> tcp:5001`)
-and reads fixed 24-byte packets. All fields are **big-endian**:
+and reads fixed **28-byte protocol-v2** packets, one per pointer per event. All
+fields are **big-endian**:
 
 ```c
-struct TouchPacket {
+struct TouchPacket {          // 28 bytes
   uint32_t magic;        // 'HXTP' = 0x48585450
-  uint16_t version;      // 1
-  uint16_t type;         // 0=down 1=move 2=up 3=cancel
+  uint16_t version;      // 2
+  uint8_t  type;         // 0=down 1=move 2=up 3=cancel 4=hover-move 5=hover-exit
+  uint8_t  tool;         // 0=finger 1=stylus 2=eraser
+  uint8_t  pointerId;    // stable per contact
+  uint8_t  pointerCount; // contacts down in this gesture
+  uint16_t pressure;     // 0..1024 (0 while hovering)
   float    normalizedX;  // 0.0 - 1.0, relative to the letterboxed video area
   float    normalizedY;  // 0.0 - 1.0
   uint64_t timestampUs;  // sender event time
 };
 ```
 
-The Windows host maps normalized coordinates onto the captured display's
-desktop rectangle and injects with `SendInput` (`MOUSEEVENTF_ABSOLUTE |
-MOUSEEVENTF_VIRTUALDESK`); down/up become left-button presses, so taps click
-and drags move windows. Single pointer in v1; disable with `--no-touch`.
+The **Windows** host maps normalized coordinates onto the captured display's
+desktop rectangle and injects real multi-touch (`InjectTouchInput`) plus a
+synthetic pen device (pressure, hover, eraser); it falls back to single-pointer
+`SendInput` when those APIs are unavailable.
+
+The **Mac** host maps the coordinates onto the captured display's bounds and
+injects a single pointer via `CGEvent` posted to the HID tap: down/up →
+left-button press (taps click, quick repeats double-click), move → drag, S Pen
+hover → cursor move. Stylus/eraser ride the mouse path for now (pen/pressure is
+a later milestone). Needs macOS Accessibility permission; disable with
+`--no-touch`.
+
+> The earlier v1 layout was 24 bytes with a `uint16 type` and no
+> tool/pointer/pressure fields; receiver v8+ and both hosts use v2. Packets are
+> 56 bytes on the wire when the link is paired (12-byte nonce + 28-byte
+> ciphertext + 16-byte tag).
 
 ## Desktop Audio (implemented, opt-in `--audio`)
 

@@ -15,6 +15,8 @@ struct Options {
     var bitrate = 25_000_000
     var displayIndex: Int?  // nil = create the native virtual display
     var removeDisplay = false
+    var noTouch = false
+    var selfTest = false
 }
 
 enum MacHostError: Error, CustomStringConvertible {
@@ -53,7 +55,7 @@ func printUsage() {
     Usage:
       MacHost --host <ip> [--port 5000] [--fps 60]
               [--width N --height N] [--bitrate 25000000]
-              [--display N]
+              [--display N] [--no-touch]
 
     By default MacHost creates a native virtual display (2960x1848@60, the
     tablet's panel) and streams THAT — a true extended display. Pass
@@ -65,9 +67,15 @@ func printUsage() {
       MacHost --host 192.168.1.50 --port 5000
       MacHost --host 127.0.0.1 --display 0        # mirror the built-in panel
       MacHost --remove-display                    # clear session virtual displays
+      MacHost --selftest                          # protocol self-tests, then exit
+
+    Touch: tablet touches and S Pen drive the Mac cursor (down/drag/up, taps
+    click, double taps double-click; hover moves the pointer). Needs the
+    Accessibility permission. Disable with --no-touch.
 
     USB-C with ADB:
       adb forward tcp:5000 tcp:5000
+      adb forward tcp:5001 tcp:5001
       MacHost --host 127.0.0.1 --port 5000
 
     The virtual display persists for the login session while idle (macOS can't
@@ -117,6 +125,10 @@ func parseOptions(_ args: [String]) throws -> Options {
             options.displayIndex = try readInt(arg)
         case "--remove-display":
             options.removeDisplay = true
+        case "--no-touch":
+            options.noTouch = true
+        case "--selftest":
+            options.selfTest = true
         default:
             throw MacHostError.invalidArgument("Unknown argument: \(arg)")
         }
@@ -533,6 +545,10 @@ struct MacHostMain {
         do {
             let options = try parseOptions(CommandLine.arguments)
 
+            if options.selfTest {
+                exit(runSelfTests())
+            }
+
             if options.removeDisplay {
                 print("Restoring the permanent display configuration. This removes " +
                       "session virtual displays (including other apps') and any " +
@@ -562,8 +578,17 @@ struct MacHostMain {
             try await host.start(display: selection.display, width: encodeWidth,
                                  height: encodeHeight, fps: options.fps)
 
+            var touchBridge: TouchBridge?
+            if !options.noTouch {
+                let port = touchPort(forHost: options.host, videoPort: options.port)
+                touchBridge = TouchBridge(host: options.host, port: port,
+                                          displayID: selection.display.displayID)
+                touchBridge?.start()
+            }
+
             print("Streaming. Press Ctrl+C to stop.")
             await parkUntilSignal()
+            touchBridge?.stop()
             await host.stop()
             if let virtualDisplay = selection.virtual {
                 // The display can't be removed on macOS 26 — park it out of the
