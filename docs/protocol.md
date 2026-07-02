@@ -98,8 +98,10 @@ synthetic pen device (pressure, hover, eraser); it falls back to single-pointer
 The **Mac** host maps the coordinates onto the captured display's bounds and
 injects a single pointer via `CGEvent` posted to the HID tap: down/up →
 left-button press (taps click, quick repeats double-click), move → drag, S Pen
-hover → cursor move. Stylus/eraser ride the mouse path for now (pen/pressure is
-a later milestone). Needs macOS Accessibility permission; disable with
+hover → cursor move. Stylus/eraser events carry the packet's **pressure** as
+tablet-point data (`mouseEventSubtype` tablet, pressure fields 0..1), so
+pressure-aware Mac apps respond to the S Pen; real multi-touch injection has
+no public macOS API. Needs macOS Accessibility permission; disable with
 `--no-touch`.
 
 > The earlier v1 layout was 24 bytes with a `uint16 type` and no

@@ -153,10 +153,20 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
   ~109 works/s with fast-changing content (cursor-driven content coalesces
   below a full 120, but this is conclusively past the 60 ceiling).
 
+- **Stage D — S Pen pressure.** Stylus/eraser packets now inject mouse events
+  marked as **tablet points** carrying the pen pressure (0..1024 → 0..1 on
+  `mouseEventPressure`/`tabletEventPointPressure`), so pressure-aware Mac apps
+  (drawing tools) respond to the S Pen; finger input stays plain mouse.
+  Verified end-to-end with a CGEventTap: `adb shell input stylus swipe` →
+  injected `subtype=1 pressure=1.00` events; finger swipe → `subtype=0`.
+  Full eraser semantics need tablet *proximity* events (future).
+
 The Mac host is no longer "video-only": it now does a native extended display,
-touch-back, LAN discovery, PIN pairing + AES-256-GCM, desktop audio, UDP
-transport, 120 fps, and HEVC. Remaining Windows-only: real multi-touch / pen
-pressure, HDR.
+touch-back with S Pen pressure, LAN discovery, PIN pairing + AES-256-GCM,
+desktop audio, UDP transport, 120 fps, and HEVC. Remaining Windows-only: real
+multi-touch injection (no public macOS API) and HDR (the virtual display's
+framebuffer is SDR — the known CGVirtualDisplay surface exposes no EDR
+capability; Windows gets HDR from its VDD driver).
 
 ## v0.8.0 — 2026-07-02
 

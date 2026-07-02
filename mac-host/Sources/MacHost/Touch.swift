@@ -87,11 +87,20 @@ final class MouseInjector {
                        y: bounds.minY + CGFloat(ny) * (bounds.height - 1))
     }
 
-    private func post(_ type: CGEventType, _ point: CGPoint, clickState: Int64 = 0) {
+    private func post(_ type: CGEventType, _ point: CGPoint, clickState: Int64 = 0,
+                      pressure: Double? = nil) {
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: .left) else { return }
         if clickState > 0 {
             event.setIntegerValueField(.mouseEventClickState, value: clickState)
+        }
+        if let pressure {
+            // Stylus/eraser: mark the event as a tablet point and carry the pen
+            // pressure so pressure-aware apps (drawing tools) respond to the
+            // S Pen. Plain mouse consumers ignore the subtype.
+            event.setIntegerValueField(.mouseEventSubtype, value: 1)  // tablet point
+            event.setDoubleValueField(.mouseEventPressure, value: pressure)
+            event.setDoubleValueField(.tabletEventPointPressure, value: pressure)
         }
         event.post(tap: .cghidEventTap)
     }
@@ -99,6 +108,9 @@ final class MouseInjector {
     func handle(_ packet: TouchPacket) {
         let point = mapToGlobal(packet.nx, packet.ny)
         lastPoint = point
+        // tool 0 = finger (plain mouse semantics); 1/2 = stylus/eraser, which
+        // carry pressure (0..1024 → 0..1) while in contact.
+        let penPressure: Double? = packet.tool != 0 ? Double(packet.pressure) / 1024.0 : nil
         switch packet.type {
         case .down:
             guard ownerPointerId < 0 else { return }  // single-pointer: ignore extra fingers
@@ -112,10 +124,10 @@ final class MouseInjector {
             } else {
                 clickState = 1
             }
-            post(.leftMouseDown, point, clickState: clickState)
+            post(.leftMouseDown, point, clickState: clickState, pressure: penPressure)
         case .move:
             if Int(packet.pointerId) == ownerPointerId {
-                post(.leftMouseDragged, point, clickState: clickState)
+                post(.leftMouseDragged, point, clickState: clickState, pressure: penPressure)
             } else if ownerPointerId < 0 {
                 post(.mouseMoved, point)
             }
@@ -124,7 +136,8 @@ final class MouseInjector {
             ownerPointerId = -1
             lastUpTime = Date()
             lastUpPoint = point
-            post(.leftMouseUp, point, clickState: clickState)
+            post(.leftMouseUp, point, clickState: clickState,
+                 pressure: packet.tool != 0 ? 0.0 : nil)
         case .hoverMove:
             if ownerPointerId < 0 {  // S Pen hovering; don't disturb a drag
                 post(.mouseMoved, point)

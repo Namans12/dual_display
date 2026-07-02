@@ -476,6 +476,53 @@ line refreshed; bundle CFBundleShortVersionString → 0.9.0. Commit:
 
 ---
 
+## Phase 2 (same day): full parity — audio, UDP, 120 fps, pen pressure, polish
+
+User asked to "finish it for Mac". Remaining matrix gaps and their feasibility:
+
+- **Desktop audio → tablet** (Stage A): ScreenCaptureKit audio capture
+  (`capturesAudio`, macOS 13+) delivers the system mix as float32 PCM →
+  convert to S16LE stereo → EXAU header (16B) + `[4B len][payload]` frames on
+  TCP :5003 (loopback → `port+3`), payload sealed with nonce domain 0x02 when
+  paired; wait for the receiver's 1-byte 0xAC ACK before streaming (launch
+  race), newest-connection-wins reconnect loop. `--audio`, `--mute-local`
+  (CoreAudio default-output mute + marker-file self-heal + periodic re-assert),
+  `--audio-delay-ms N` [40]. Launcher forwards :5003.
+- **UDP video** (Stage B): `--udp` (requires a non-loopback target — adb can't
+  forward UDP): per NAL, seal-if-paired (domain 0x01) then fragment into
+  ≤1400-byte payloads behind the 12-byte EXUD header (magic/nalSeq/fragIndex/
+  fragCount, BE), sendto :5000, SO_SNDBUF 4 MB. Fragmentation is a pure
+  function covered by --selftest. UDP has no liveness → single supervisor pass.
+- **120 fps** (Stage C): `--fps 120` creates the virtual display at
+  **1920x1200@120** (HiDPI pair 960x600) — the Windows host's measured
+  sweet spot (native 2960@120 overruns the pipeline) — and restores
+  2960x1848@60 for <120. Adoption only if the surviving display has the
+  target mode. queueDepth 5 at 120.
+- **S Pen pressure** (Stage D): stylus/eraser packets post mouse events with
+  subtype `tabletPoint` + `mouseEventPressure`/`tabletEventPointPressure`
+  (0..1 from the packet's 0..1024). Verified via a CGEventTap listener +
+  `adb shell input stylus swipe` (source stylus → toolType stylus → pressure
+  path). True eraser semantics need tablet *proximity* events — deferred.
+- **Polish** (Stage E): launcher reads a pairing code from
+  `~/Library/Application Support/ExtendedDisplay/pairing.code` (→
+  `EXTDISPLAY_KEY`, parity with the Windows GUI's persisted code) and extra
+  args from `.../options`; docs/matrix/README/CHANGELOG sweep.
+
+**Explicit non-goals, documented as such (platform limits, not laziness):**
+- **HDR**: the CGVirtualDisplay descriptor (known surface) exposes no EDR
+  capability, so the virtual framebuffer is SDR; Windows gets HDR via its VDD
+  driver. Capturing a real HDR display could work later, but the built-in
+  panel here isn't XDR. Documented Windows-only.
+- **True multi-touch injection**: macOS has no public API to inject
+  multi-touch into arbitrary apps (Windows has InjectTouchInput). Documented.
+- **Settings GUI**: the DMG launcher + options file covers the plug-and-play
+  story; a native GUI stays on the roadmap.
+
+Verification stays on-device per stage: audio via receiver "Audio: playing
+48000Hz 2ch enc=…" log + sustained connection (both plaintext and sealed);
+UDP via "Connected (Wi-Fi/UDP)" + decode; 120 fps via decoder Work-Rate ≈120/s;
+pen pressure via the event-tap assertions.
+
 ## Self-Review (done at write time)
 
 - Spec coverage: 1→build/USB/WiFi/DMG ✓, 2→CGVirtualDisplay 2960x1848@60 + capture-that ✓,

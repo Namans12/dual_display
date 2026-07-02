@@ -21,7 +21,7 @@ pen, UDP, 120 fps and HDR remain Windows-only (see the matrix below).
 | Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264 + HEVC, TCP + UDP |
 | Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848@60 HiDPI (default) |
 | Tablet discovery | ✅ UDP broadcast | ✅ `--wifi` (UDP broadcast), or `--host <ip>` |
-| Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse (stylus rides the mouse path) |
+| Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse + S Pen pressure (tablet-point events) |
 | Desktop audio → tablet | ✅ | ❌ |
 | PIN pairing + AES-256-GCM encryption | ✅ all channels | ✅ video + touch (audio n/a) |
 | 120 fps mode switch | ✅ 1920x1200@120 | ✅ 1920x1200@120 (`--fps 120`) |
@@ -211,7 +211,10 @@ Verify the KDF matches the other platforms byte-for-byte:
 
 ## Limitations (honest)
 
-- Touch is single-pointer mouse (no real multi-touch or pen pressure yet).
+- Touch is single-pointer (macOS has no public API to inject real multi-touch
+  into arbitrary apps — Windows has `InjectTouchInput`). S Pen **pressure** is
+  carried on the mouse events as tablet-point data, so pressure-aware apps
+  respond; full eraser semantics need tablet *proximity* events (future).
 - No desktop-audio channel yet (so nothing to encrypt there); the audio path
   lives only in the Windows host (see [SECURITY.md](../SECURITY.md) and the
   README feature table).
