@@ -18,7 +18,7 @@ pen, UDP, 120 fps and HDR remain Windows-only (see the matrix below).
 
 | Capability | Windows host (v0.8.0) | Mac host |
 |---|---|---|
-| Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264 + HEVC, TCP only |
+| Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264 + HEVC, TCP + UDP |
 | Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848@60 HiDPI (default) |
 | Tablet discovery | ✅ UDP broadcast | ✅ `--wifi` (UDP broadcast), or `--host <ip>` |
 | Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse (stylus rides the mouse path) |
@@ -135,7 +135,11 @@ right edge of your Mac and they appear on the tablet.
 --display N       capture existing SCK display N (mirror)      [off = virtual]
 --hevc            encode HEVC/H.265 instead of H.264 (sharper at high res)
 --wifi            discover the tablet on the LAN (UDP :5002), then TCP
+--udp             low-latency UDP video (needs --wifi or --host; not USB)
 --no-touch        disable tablet touch → Mac cursor injection
+--audio           stream Mac audio to the tablet (see below)
+--mute-local      with --audio: mute the Mac's own speakers
+--audio-delay-ms  tablet audio buffer for A/V sync            [40]
 --remove-display  clear session virtual displays and exit
 --selftest        run protocol self-tests and exit
 ```
@@ -187,6 +191,13 @@ Verify the KDF matches the other platforms byte-for-byte:
   listener and streams into it. Re-run `adb forward tcp:5000 tcp:5000` (the
   forward's specific 127.0.0.1 bind takes precedence over AirPlay's wildcard
   bind, so both can coexist).
+- **`--udp` shows a black or frozen picture** → your Wi-Fi path can't carry
+  the keyframe bursts (a keyframe is dozens of datagrams; if any one drops,
+  that keyframe is lost and video only recovers on the next complete one —
+  UDP has no retransmission). Watch the periodic `UDP: N pkts/s` line, lower
+  `--bitrate`/`--width/--height`, or just use TCP (the default), which is
+  immune. The Mac host paces large bursts and never blocks encoding on a
+  congested link (drops instead).
 - **App stays on "Waiting…"** → MacHost isn't reaching the tablet — verify with
   `nc -vz <tablet-ip> 5000`.
 - **Choppy / lagging** → lower `--fps` (30) or `--bitrate`; the TCP write runs

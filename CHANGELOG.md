@@ -115,9 +115,38 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
   `c2.qti.hevc.decoder` and shows "Decoding HEVC"; `--hevc` + `EXTDISPLAY_KEY`
   → encrypted HEVC decodes (full-desktop frame) with touch still pixel-exact.
 
+- **Stage A — desktop audio (`--audio`).** ScreenCaptureKit audio capture (the
+  WASAPI-loopback equivalent: the whole system mix) → interleaved S16LE →
+  16-byte `EXAU` header + length-prefixed frames on TCP 5003 (USB: `port+3`),
+  sealed with nonce domain `0x02` when paired; waits for the receiver's 1-byte
+  ACK (app-launch race), reconnects forever. `--mute-local` mutes the Mac's
+  default output via CoreAudio while streaming (re-asserted every 500 ms),
+  restores on stop, and self-heals with a marker file after a force-kill.
+  `--audio-delay-ms` (default 40) drives the tablet's A/V-sync buffer.
+  Verified on-device: plaintext `Audio: playing 48000Hz 2ch enc=false` and
+  paired `enc=true`, sustained, while video decodes; mute set/restore/self-heal
+  all observed via CoreAudio state.
+
+- **Stage B — UDP video (`--udp`, Wi-Fi).** Per NAL: seal-if-paired (domain
+  `0x01`), then fragment behind the plaintext 12-byte `EXUD` header
+  (≤1400-byte payloads), `SO_SNDBUF` 4 MB. Requires `--wifi`/`--host` (adb
+  can't forward UDP). Wire format pinned by `--selftest` vectors and verified
+  three ways: a local reference reassembler (complete IDRs, valid Annex-B), a
+  known-good NAL replay to the tablet, and live on-device rendering —
+  plaintext and paired.
+  - **Real-time sends never block encoding:** the socket is non-blocking; on a
+    congested egress the rest of the NAL is dropped whole (a NAL missing one
+    fragment is dead anyway) — a blocking `sendto` against a slow Wi-Fi peer
+    was observed freezing the VideoToolbox callback (and thus the stream) ~1 s
+    in. Large NALs are paced (1 ms per 8 fragments) so keyframe bursts survive;
+    a periodic `UDP: N pkts/s, M Mbps` line surfaces throughput and drops.
+  - Honest limit (documented): on a weak/slow Wi-Fi path, native-resolution
+    keyframe bursts may not fit through — video then stays on its last frame
+    until a keyframe completes. Lower `--bitrate`/resolution, or use TCP.
+
 The Mac host is no longer "video-only": it now does a native extended display,
-touch-back, LAN discovery, PIN pairing + AES-256-GCM, and HEVC. Remaining
-Windows-only: desktop audio, real multi-touch / pen pressure, UDP transport,
+touch-back, LAN discovery, PIN pairing + AES-256-GCM, desktop audio, UDP
+transport, and HEVC. Remaining Windows-only: real multi-touch / pen pressure,
 120 fps mode-switch, HDR.
 
 ## v0.8.0 — 2026-07-02

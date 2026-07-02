@@ -26,6 +26,7 @@ struct Options {
     var audio = false
     var muteLocal = false
     var audioDelayMs = 40
+    var udp = false
 }
 
 enum MacHostError: Error, CustomStringConvertible {
@@ -64,7 +65,7 @@ func printUsage() {
     Usage:
       MacHost [--wifi | --host <ip>] [--port 5000] [--fps 60]
               [--width N --height N] [--bitrate 25000000]
-              [--display N] [--hevc] [--no-touch]
+              [--display N] [--hevc] [--udp] [--no-touch]
               [--audio [--mute-local] [--audio-delay-ms 40]]
 
     --wifi discovers the tablet on the LAN (UDP broadcast) so no IP is needed;
@@ -126,6 +127,8 @@ func parseOptions(_ args: [String]) throws -> Options {
             options.hostExplicit = true
         case "--wifi":
             options.wifi = true
+        case "--udp":
+            options.udp = true
         case "--port":
             options.port = try readInt(arg)
         case "--fps":
@@ -177,6 +180,15 @@ func parseOptions(_ args: [String]) throws -> Options {
     }
     guard options.bitrate > 0 else {
         throw MacHostError.invalidArgument("--bitrate must be positive")
+    }
+    if options.udp {
+        // adb can't forward UDP, so loopback is never a valid UDP target.
+        let loopback = options.host == "127.0.0.1" || options.host == "localhost" || options.host == "::1"
+        guard options.wifi || (options.hostExplicit && !loopback) else {
+            throw MacHostError.invalidArgument(
+                "--udp needs a network target: add --wifi or --host <tablet-ip> " +
+                "(UDP can't ride an adb forward)")
+        }
     }
 
     return options
@@ -250,48 +262,66 @@ final class TcpWriter {
     }
 }
 
-// Sends encoded NAL units to the tablet. Plaintext: writes each Annex-B NAL
-// (start code included) straight to the socket — an Annex-B byte stream the
-// receiver's splitter consumes. Encrypted (paired): sends the 4-byte 'EXVE'
-// marker once, then each NAL as [4B BE length][12B nonce][ct][16B tag] (nonce
-// domain 0x01), which the receiver drains until keyed and then decrypts — the
-// same wire format as the Windows encrypted-TCP path.
+// Sends encoded NAL units to the tablet over the chosen transport.
 //
-// A write failure (the tablet closed the connection) sets `alive` false so the
-// supervisor loop can reconnect. SIGPIPE is ignored process-wide, so the failing
-// write returns an error here instead of killing the process.
+// TCP plaintext: each Annex-B NAL (start code included) goes straight to the
+// socket — an Annex-B byte stream the receiver's splitter consumes.
+// TCP encrypted (paired): the 4-byte 'EXVE' marker once, then each NAL as
+// [4B BE length][12B nonce][ct][16B tag] (nonce domain 0x01) — the Windows
+// encrypted-TCP wire format.
+// UDP (--udp): each NAL (sealed first when paired) fragmented behind the
+// plaintext EXUD header — see Udp.swift. UDP has no connection to lose, so
+// `alive` never clears in that mode.
+//
+// A TCP write failure (the tablet closed the connection) sets `alive` false so
+// the supervisor loop can reconnect. SIGPIPE is ignored process-wide, so the
+// failing write returns an error here instead of killing the process.
 final class VideoSender {
-    private let writer: TcpWriter
-    private let sealer: Sealer?
+    private enum Transport {
+        case tcp(TcpWriter, Sealer?)
+        case udp(UdpVideoSender)
+    }
+
+    private let transport: Transport
     let alive = AtomicFlag()
 
     init(writer: TcpWriter, key: SymmetricKey?) throws {
-        self.writer = writer
-        self.sealer = key.map { Sealer(key: $0, domain: 0x01) }
+        let sealer = key.map { Sealer(key: $0, domain: 0x01) }
+        transport = .tcp(writer, sealer)
         alive.set()
         if sealer != nil {
             try writer.write(Data([0x45, 0x58, 0x56, 0x45]))  // 'EXVE'
         }
     }
 
+    init(udp: UdpVideoSender) {
+        transport = .udp(udp)
+        alive.set()
+    }
+
     // Called serially from the VideoToolbox output callback.
     func send(nal: Data) throws {
-        do {
-            guard let sealer else {
-                try writer.write(nal)
-                return
+        switch transport {
+        case .udp(let sender):
+            sender.send(nal: nal)
+        case .tcp(let writer, let sealer):
+            do {
+                guard let sealer else {
+                    try writer.write(nal)
+                    return
+                }
+                guard let frame = sealer.seal(nal) else {
+                    throw MacHostError.socket("Failed to encrypt a video frame")
+                }
+                let n = UInt32(frame.count)
+                var out = Data([UInt8(n >> 24), UInt8((n >> 16) & 0xff),
+                                UInt8((n >> 8) & 0xff), UInt8(n & 0xff)])
+                out.append(frame)
+                try writer.write(out)
+            } catch {
+                alive.clear()  // tablet dropped — supervisor reconnects
+                throw error
             }
-            guard let frame = sealer.seal(nal) else {
-                throw MacHostError.socket("Failed to encrypt a video frame")
-            }
-            let n = UInt32(frame.count)
-            var out = Data([UInt8(n >> 24), UInt8((n >> 16) & 0xff),
-                            UInt8((n >> 8) & 0xff), UInt8(n & 0xff)])
-            out.append(frame)
-            try writer.write(out)
-        } catch {
-            alive.clear()  // tablet dropped — supervisor reconnects
-            throw error
         }
     }
 }
@@ -745,13 +775,23 @@ struct MacHostMain {
             // Windows host restarting the stream on disconnect.
             var reconnecting = false
             while !g_stop.isSet {
-                print(reconnecting ? "Reconnecting to \(options.host):\(options.port)…"
-                                   : "Connecting to \(options.host):\(options.port)")
-                guard let writer = await connectWithRetry(host: options.host, port: options.port) else {
-                    break  // stopping
+                let videoSender: VideoSender
+                if options.udp {
+                    // Connectionless: stream blind (loss shows as a brief glitch
+                    // that clears on the next keyframe). One pass; Ctrl+C ends it.
+                    print("Streaming over UDP to \(options.host):\(options.port)")
+                    videoSender = VideoSender(udp: try UdpVideoSender(host: options.host,
+                                                                      port: options.port,
+                                                                      key: pairKey))
+                } else {
+                    print(reconnecting ? "Reconnecting to \(options.host):\(options.port)…"
+                                       : "Connecting to \(options.host):\(options.port)")
+                    guard let writer = await connectWithRetry(host: options.host, port: options.port) else {
+                        break  // stopping
+                    }
+                    videoSender = try VideoSender(writer: writer, key: pairKey)
                 }
 
-                let videoSender = try VideoSender(writer: writer, key: pairKey)
                 let encoder = try AnnexBEncoder(codec: codec, width: encodeWidth, height: encodeHeight,
                                                 fps: options.fps, bitrate: options.bitrate,
                                                 sender: videoSender)
@@ -762,7 +802,7 @@ struct MacHostMain {
                                      height: encodeHeight, fps: options.fps)
                 print(reconnecting ? "Reconnected. Streaming." : "Streaming. Press Ctrl+C to stop.")
 
-                // Wait until the tablet drops the stream or the user quits.
+                // Wait until the tablet drops the stream (TCP only) or the user quits.
                 while !g_stop.isSet && videoSender.alive.isSet {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                 }

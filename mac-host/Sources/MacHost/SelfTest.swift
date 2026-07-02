@@ -70,6 +70,20 @@ func runSelfTests() -> Int32 {
     expect(samples[0] == 16383 && samples[1] == -16383, "0.5/-0.5 scale")
     expect(samples[2] == 32767 && samples[4] == -32768, "clamped at rails")
 
+    // UDP fragmentation: 3000-byte blob → 1400 + 1400 + 200, EXUD headers BE.
+    let frags = Udp.fragments(of: Data(repeating: 0xAB, count: 3000), nalSeq: 0x0102_0304)
+    expect(frags.count == 3, "3000B → 3 fragments")
+    if frags.count == 3 {
+        expect(frags[0].count == 12 + 1400 && frags[2].count == 12 + 200, "fragment sizes")
+        expect(Array(frags[0].prefix(4)) == [0x45, 0x58, 0x55, 0x44], "EXUD magic")
+        expect(Array(frags[1][4..<8]) == [0x01, 0x02, 0x03, 0x04], "nalSeq BE")
+        expect(Array(frags[1][8..<10]) == [0x00, 0x01], "fragIndex 1")
+        expect(Array(frags[1][10..<12]) == [0x00, 0x03], "fragCount 3")
+        expect(frags[2][12] == 0xAB, "payload bytes")
+    }
+    expect(Udp.fragments(of: Data([0x01]), nalSeq: 0).count == 1, "1B → 1 fragment")
+    expect(Udp.fragments(of: Data(), nalSeq: 0).isEmpty, "empty → none")
+
     // Discovery reply parsing.
     expect(Discovery.deviceName(fromReply: "EXTDISP!v1|Samsung SM-X910|5000") == "Samsung SM-X910",
            "discovery reply name")
@@ -79,7 +93,7 @@ func runSelfTests() -> Int32 {
     expect(Discovery.deviceName(fromReply: "garbage") == nil, "garbage rejected")
 
     if failures == 0 {
-        print("selftest: OK (touch v2 parse, audio wire format, discovery reply parse)")
+        print("selftest: OK (touch v2 parse, audio wire format, UDP fragmentation, discovery reply parse)")
         return 0
     }
     print("selftest: \(failures) failure(s)")
