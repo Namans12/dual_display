@@ -410,6 +410,37 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
     }
 }
 
+// Keeps the process alive until SIGINT/SIGTERM, then returns so callers can tear
+// down (virtual display, in-flight sockets) before exiting. RunLoop.run() is
+// unavailable from async contexts; frames arrive on their own queues anyway.
+func parkUntilSignal() async {
+    final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+        func first() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if fired { return false }
+            fired = true
+            return true
+        }
+    }
+    let once = Once()
+    var sources: [DispatchSourceSignal] = []
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        for sig in [SIGINT, SIGTERM] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler {
+                if once.first() { continuation.resume() }
+            }
+            source.activate()
+            sources.append(source)
+        }
+    }
+    withExtendedLifetime(sources) {}
+}
+
 @main
 struct MacHostMain {
     static func main() async {
@@ -425,7 +456,9 @@ struct MacHostMain {
             try await host.start()
 
             print("Streaming. Press Ctrl+C to stop.")
-            RunLoop.current.run()
+            await parkUntilSignal()
+            print("Stopping.")
+            exit(0)
         } catch {
             fputs("Error: \(error)\n\n", stderr)
             printUsage()
