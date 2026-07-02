@@ -102,6 +102,7 @@ if [[ -z "$INSTALLED" || "$INSTALLED" -lt "$REQUIRED_APP_VERSION" ]]; then
 fi
 "$ADB" forward tcp:5000 tcp:5000
 "$ADB" forward tcp:5001 tcp:5001    # touch uplink (tablet -> Mac input)
+"$ADB" forward tcp:5003 tcp:5003    # desktop audio (only used with --audio)
 "$ADB" shell am start -n com.heysnap.extdisplay/.MainActivity
 sleep 1.5
 

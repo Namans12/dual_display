@@ -23,6 +23,9 @@ struct Options {
     var cryptoSelfTest = false
     var deriveKeyCode: String?
     var hevc = false
+    var audio = false
+    var muteLocal = false
+    var audioDelayMs = 40
 }
 
 enum MacHostError: Error, CustomStringConvertible {
@@ -62,6 +65,7 @@ func printUsage() {
       MacHost [--wifi | --host <ip>] [--port 5000] [--fps 60]
               [--width N --height N] [--bitrate 25000000]
               [--display N] [--hevc] [--no-touch]
+              [--audio [--mute-local] [--audio-delay-ms 40]]
 
     --wifi discovers the tablet on the LAN (UDP broadcast) so no IP is needed;
     --host <ip> connects to a specific address (or 127.0.0.1 with adb forward).
@@ -136,6 +140,12 @@ func parseOptions(_ args: [String]) throws -> Options {
             options.displayIndex = try readInt(arg)
         case "--hevc":
             options.hevc = true
+        case "--audio":
+            options.audio = true
+        case "--mute-local":
+            options.muteLocal = true
+        case "--audio-delay-ms":
+            options.audioDelayMs = try readInt(arg)
         case "--remove-display":
             options.removeDisplay = true
         case "--no-touch":
@@ -489,10 +499,12 @@ final class AnnexBEncoder {
 
 final class ScreenCaptureHost: NSObject, SCStreamOutput {
     private let encoder: AnnexBEncoder
+    private let audioSink: ((CMSampleBuffer) -> Void)?
     private var stream: SCStream?
 
-    init(encoder: AnnexBEncoder) {
+    init(encoder: AnnexBEncoder, audioSink: ((CMSampleBuffer) -> Void)? = nil) {
         self.encoder = encoder
+        self.audioSink = audioSink
     }
 
     func start(display: SCDisplay, width: Int, height: Int, fps: Int) async throws {
@@ -501,12 +513,23 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
         configuration.width = width
         configuration.height = height
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-        configuration.queueDepth = 3
+        configuration.queueDepth = fps >= 120 ? 5 : 3
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         configuration.showsCursor = true
+        if audioSink != nil {
+            // System-audio mix (the display filter excludes nothing, so this is
+            // everything the Mac plays — the WASAPI-loopback equivalent).
+            configuration.capturesAudio = true
+            configuration.sampleRate = 48000
+            configuration.channelCount = 2
+            configuration.excludesCurrentProcessAudio = true
+        }
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "screen.frames"))
+        if audioSink != nil {
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "audio.frames"))
+        }
         try await stream.startCapture()
         self.stream = stream
     }
@@ -519,8 +542,12 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
-        guard outputType == .screen else { return }
-        guard CMSampleBufferIsValid(sampleBuffer),
+        guard CMSampleBufferIsValid(sampleBuffer) else { return }
+        if outputType == .audio {
+            audioSink?(sampleBuffer)
+            return
+        }
+        guard outputType == .screen,
               let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
             return
         }
@@ -625,6 +652,7 @@ struct MacHostMain {
         setvbuf(stdout, nil, _IOLBF, 0)  // line-buffered: Finder launches log to a file
         signal(SIGPIPE, SIG_IGN)  // a dead-socket write must return an error, not kill us
         installSignalHandlers()   // SIGINT/SIGTERM → g_stop → clean teardown
+        LocalMute.restoreIfNeeded()  // self-heal a mute left by a force-killed run
         do {
             var options = try parseOptions(CommandLine.arguments)
 
@@ -701,6 +729,16 @@ struct MacHostMain {
                 touchBridge?.start()
             }
 
+            var audioBridge: AudioBridge?
+            if options.audio {
+                let port = audioPort(forHost: options.host, videoPort: options.port)
+                audioBridge = AudioBridge(host: options.host, port: port, key: pairKey,
+                                          delayMs: options.audioDelayMs,
+                                          muteLocal: options.muteLocal)
+                audioBridge?.start()
+                print("Desktop audio bridge active (Mac audio plays on the tablet).")
+            }
+
             // Supervisor loop: connect, stream until the tablet drops (SIGPIPE is
             // ignored process-wide, so a dead-socket write returns an error and
             // clears the sender's `alive` flag), then reconnect — like the
@@ -717,7 +755,9 @@ struct MacHostMain {
                 let encoder = try AnnexBEncoder(codec: codec, width: encodeWidth, height: encodeHeight,
                                                 fps: options.fps, bitrate: options.bitrate,
                                                 sender: videoSender)
-                let host = ScreenCaptureHost(encoder: encoder)
+                let host = ScreenCaptureHost(
+                    encoder: encoder,
+                    audioSink: audioBridge.map { bridge in { bridge.enqueue($0) } })
                 try await host.start(display: selection.display, width: encodeWidth,
                                      height: encodeHeight, fps: options.fps)
                 print(reconnecting ? "Reconnected. Streaming." : "Streaming. Press Ctrl+C to stop.")
@@ -736,6 +776,7 @@ struct MacHostMain {
             }
 
             touchBridge?.stop()
+            audioBridge?.stop()  // also un-mutes the Mac if --mute-local was on
             // Hold the reference until here so the display lives for the whole run;
             // exiting (below) is what removes it — WindowServer reclaims a virtual
             // display when its owner exits.

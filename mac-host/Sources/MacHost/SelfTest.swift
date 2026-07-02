@@ -55,6 +55,21 @@ func runSelfTests() -> Int32 {
     overPressure[11] = 0xD0  // 2000
     expect(parseTouchPacket(overPressure)?.pressure == 1024, "pressure clamped to 1024")
 
+    // Audio wire format: header layout and float→S16 conversion.
+    let header = audioHeader(rate: 48000, encrypted: true, delayMs: 40)
+    expect(header.count == 16, "audio header is 16 bytes")
+    expect(Array(header.prefix(4)) == [0x45, 0x58, 0x41, 0x55], "audio magic EXAU")
+    expect(Array(header[4..<8]) == [0x00, 0x00, 0xBB, 0x80], "audio rate 48000 BE")
+    expect(Array(header[8..<10]) == [0x00, 0x02], "audio channels 2")
+    expect(header[10] == 0x10, "audio bits 16")
+    expect(header[11] == 0x01, "audio encrypted flag")
+    expect(Array(header[12..<14]) == [0x00, 0x28], "audio delayMs 40 BE")
+    let pcm = floatBuffersToS16Stereo([[0.5, 2.0, -3.0], [-0.5, 1.0, 0.0]])
+    expect(pcm.count == 12, "3 stereo frames = 12 bytes")
+    let samples = pcm.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+    expect(samples[0] == 16383 && samples[1] == -16383, "0.5/-0.5 scale")
+    expect(samples[2] == 32767 && samples[4] == -32768, "clamped at rails")
+
     // Discovery reply parsing.
     expect(Discovery.deviceName(fromReply: "EXTDISP!v1|Samsung SM-X910|5000") == "Samsung SM-X910",
            "discovery reply name")
@@ -64,7 +79,7 @@ func runSelfTests() -> Int32 {
     expect(Discovery.deviceName(fromReply: "garbage") == nil, "garbage rejected")
 
     if failures == 0 {
-        print("selftest: OK (touch v2 parse, discovery reply parse)")
+        print("selftest: OK (touch v2 parse, audio wire format, discovery reply parse)")
         return 0
     }
     print("selftest: \(failures) failure(s)")
