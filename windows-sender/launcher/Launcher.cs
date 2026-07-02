@@ -32,9 +32,9 @@ namespace ExtendedDisplay
         const string VddInstanceId = @"ROOT\DISPLAY\0000";
 
         RadioButton rbUsb, rbWifi;
+        RadioButton rbBestRes, rbBalanced, rbSmooth;
         CheckBox chkUdp, chkTouch, chkHevc, chkHdr, chkEncrypt, chkAudio, chkMute;
-        ComboBox cmbFps, cmbEnc;
-        TextBox txtBit, txtIp;
+        TextBox txtIp;
         NumericUpDown numDelay;
         Button btnStart, btnStop;
         Label lblStatus, lblCode;
@@ -72,20 +72,18 @@ namespace ExtendedDisplay
             rbWifi.CheckedChanged += (s, e) => { chkUdp.Enabled = rbWifi.Checked; txtIp.Enabled = rbWifi.Checked; };
             grpConn.Controls.AddRange(new Control[] { rbUsb, rbWifi, lblIp, txtIp, chkUdp, iUdp });
 
-            // ── Video ─────────────────────────────────────────────────────
-            var grpVid = new GroupBox { Text = "Video", Location = new Point(12, 114), Size = new Size(376, 100) };
-            var lblFps = new Label { Text = "FPS:", Location = new Point(12, 28), AutoSize = true };
-            cmbFps = new ComboBox { Location = new Point(70, 25), Width = 70, DropDownStyle = ComboBoxStyle.DropDownList };
-            cmbFps.Items.AddRange(new object[] { "60", "120" }); cmbFps.SelectedIndex = 0;
-            var iFps = Info(28, "120 fps drops the virtual display to 2560x1600 (the tablet upscales) so the pipeline can sustain 120 Hz. 60 fps runs at native 2960x1848.", cmbFps);
-            var lblEnc = new Label { Text = "Encoder:", Location = new Point(158, 28), AutoSize = true };
-            cmbEnc = new ComboBox { Location = new Point(224, 25), Width = 96, DropDownStyle = ComboBoxStyle.DropDownList };
-            cmbEnc.Items.AddRange(new object[] { "Auto", "nvenc", "qsv", "mf", "amf", "x264" }); cmbEnc.SelectedIndex = 0;
-            tip.SetToolTip(cmbEnc, Wrap("Leave on Auto - it picks the best working GPU encoder (NVENC, QSV, MF, AMF, x264 in order). Pin one only for troubleshooting."));
-            var lblBit = new Label { Text = "Bitrate (Kbps):", Location = new Point(12, 64), AutoSize = true };
-            txtBit = new TextBox { Text = "25000", Location = new Point(115, 61), Width = 90 };
-            tip.SetToolTip(txtBit, Wrap("Video bitrate in Kbps. Higher = crisper text, more bandwidth. 25000 is a good default; try 40000 for very sharp text."));
-            grpVid.Controls.AddRange(new Control[] { lblFps, cmbFps, iFps, lblEnc, cmbEnc, lblBit, txtBit });
+            // ── Quality ───────────────────────────────────────────────────
+            // One preset instead of FPS / encoder / bitrate knobs — each maps to
+            // proven values (the encoder always uses the auto-ladder). Fine-grained
+            // control stays on the CLI (--fps / --bitrate / --encoder).
+            var grpVid = new GroupBox { Text = "Quality", Location = new Point(12, 114), Size = new Size(376, 100) };
+            rbBestRes = new RadioButton { Text = "Best resolution", Location = new Point(12, 22), AutoSize = true };
+            var iBestRes = Info(22, "Sharpest picture - native 2960x1848 at 60 fps with a higher 40 Mbps bitrate. Best for reading / documents / coding. Prefers USB or strong 5 GHz Wi-Fi.", rbBestRes);
+            rbBalanced = new RadioButton { Text = "Balanced  (recommended)", Location = new Point(12, 48), AutoSize = true, Checked = true };
+            var iBalanced = Info(48, "Native 2960x1848 at 60 fps, 25 Mbps - the proven default. Right for almost everything.", rbBalanced);
+            rbSmooth = new RadioButton { Text = "Smooth motion  (120 fps)", Location = new Point(12, 74), AutoSize = true };
+            var iSmooth = Info(74, "Silkiest cursor / scrolling / gaming feel - 120 fps with the virtual display at 1920x1200 (the tablet upscales).", rbSmooth);
+            grpVid.Controls.AddRange(new Control[] { rbBestRes, iBestRes, rbBalanced, iBalanced, rbSmooth, iSmooth });
 
             // ── Options ───────────────────────────────────────────────────
             // Short labels; the full description is on the ⓘ (and on hover of the row).
@@ -93,7 +91,7 @@ namespace ExtendedDisplay
             chkTouch = new CheckBox { Text = "Touch input", Location = new Point(12, 24), AutoSize = true, Checked = true };
             var iTouch = Info(24, "Tablet touches control the PC - tap = click, drag = move / scroll, long-press = right-click. S Pen pressure & hover work too.", chkTouch);
             chkHevc = new CheckBox { Text = "HEVC / H.265", Location = new Point(12, 50), AutoSize = true };
-            var iHevc = Info(50, "H.265 encoding - sharper at high resolution / FPS for the same bitrate. Needs tablet HEVC support (the S9 Ultra has it).", chkHevc);
+            var iHevc = Info(50, "H.265 - better compression, so motion (video playback, scrolling) looks cleaner at the same bitrate. Barely visible on a static desktop; tick it mainly for watching video. Needs tablet HEVC decode (the S9 Ultra has it).", chkHevc);
             chkHdr = new CheckBox { Text = "HDR", Location = new Point(12, 76), AutoSize = true };
             var iHdr = Info(76, "Experimental - for HDR video content only. The normal SDR desktop looks washed out, so leave this OFF for general use.", chkHdr);
             chkAudio = new CheckBox { Text = "Desktop audio", Location = new Point(12, 102), AutoSize = true };
@@ -311,10 +309,10 @@ namespace ExtendedDisplay
             if (chkAudio.Checked) sb.Append(" --audio");
             if (chkAudio.Checked) sb.Append(" --audio-delay-ms " + (int)numDelay.Value);
             if (chkMute.Checked && chkMute.Enabled) sb.Append(" --mute-local");
-            if (cmbEnc.SelectedIndex > 0) sb.Append(" --encoder " + cmbEnc.SelectedItem);
-            if ((string)cmbFps.SelectedItem != "60") sb.Append(" --fps " + cmbFps.SelectedItem);
-            string bit = txtBit.Text.Trim();
-            if (bit.Length > 0 && bit != "25000") sb.Append(" --bitrate " + bit);
+            // Quality preset -> flags. Balanced = the sender's defaults (60 fps,
+            // 25 Mbps, auto encoder), so it adds nothing.
+            if (rbBestRes.Checked) sb.Append(" --bitrate 40000");
+            if (rbSmooth.Checked) sb.Append(" --fps 120");
 
             try
             {

@@ -2335,19 +2335,14 @@ int main(int argc, char** argv) {
                   << ", output " << selected->outputIndex << ")\n";
 
         // 120 Hz at native 2960x1848 is past the capture+encode throughput (frames
-        // back up, the cursor drags). Drop the VDD to the sharpest lighter 16:10 mode
-        // the pipeline sustains at 120 Hz — measured on-device: 2560x1600 holds
-        // fps=120 at 0.997x over 60s (1920x1200 is the fallback if that mode is
-        // unavailable); the tablet upscales to its panel. For <120 fps restore
-        // native (a prior 120 fps run persists the lowered mode in the registry,
-        // so a later 60 fps run would otherwise stay lowered).
-        if (options.fps >= 120 && selected->width > 2560) {
-            if (setDisplayResolution(selected->name, 2560, 1600, options.fps)) {
-                Sleep(1000);
-                selected->width = 2560;
-                selected->height = 1600;
-                std::cout << "120 fps: virtual display set to 2560x1600 for smooth 120 Hz.\n";
-            } else if (setDisplayResolution(selected->name, 1920, 1200, options.fps)) {
+        // back up, the cursor drags). Drop the VDD to a lighter 16:10 mode; the
+        // tablet upscales to its panel. 1920x1200 chosen over 2560x1600: both held
+        // ffmpeg fps=120 (0.989x / 0.997x), but 2560 was perceptibly less smooth
+        // on-device — the encoder stat can't see decode/render headroom. For
+        // <120 fps restore native (a prior 120 fps run persists the lowered mode
+        // in the registry, so a later 60 fps run would otherwise stay lowered).
+        if (options.fps >= 120 && selected->width > 1920) {
+            if (setDisplayResolution(selected->name, 1920, 1200, options.fps)) {
                 Sleep(1000);
                 selected->width = 1920;
                 selected->height = 1200;

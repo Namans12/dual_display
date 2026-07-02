@@ -61,11 +61,17 @@ Improvements (Wi-Fi robustness + usability + security + desktop audio).
 
 - **Smooth 120 fps.** At native 2960×1848, 120 Hz overruns the capture+encode
   throughput (~656 Mpix/s — past 4K60), so frames back up and even the cursor
-  drags. When `--fps 120` is selected the sender now drops the virtual display to
-  **2560×1600**, the sharpest mode the pipeline sustains at 120 Hz (measured:
-  ffmpeg holds **fps=120 at 0.997× speed** over 60 s; falls back to 1920×1200 if
-  that mode is unavailable). The tablet upscales to its panel; native resolution
-  is restored automatically for ≤60 fps.
+  drags. When 120 fps is selected the sender now drops the virtual display to
+  **1920×1200** (the tablet upscales); native resolution is restored automatically
+  for ≤60 fps. 2560×1600@120 was measured too — ffmpeg held fps=120 at 0.997× —
+  but it was *perceptibly* less smooth on-device (the encoder stat can't see
+  decode/render headroom), so the smoothest mode won.
+- **GUI simplified.** The FPS / encoder / bitrate knobs are replaced by one
+  **Quality** preset — *Best resolution* (native@60, 40 Mbps), *Balanced*
+  (native@60, 25 Mbps, recommended) or *Smooth motion* (120 fps @1920×1200) — and
+  every option is now a short label with an ⓘ info marker (hover for the wrapped
+  description; the old inline descriptions clipped at the window edge). Encoder
+  selection always uses the auto-ladder; fine-grained control stays on the CLI.
 - **UDP path robustness:** a bigger socket send buffer (4 MB) so a keyframe's
   fragment burst isn't dropped by the OS/Wi-Fi driver. (Intra-refresh was tried but
   **reverted** — removing periodic IDRs left the decoder with nothing to resync on
