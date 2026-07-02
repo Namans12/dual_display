@@ -28,7 +28,7 @@ ExtendedDisplaySender.exe --bitrate 40000   # crisper text
 
 ## For Users — Mac
 
-Build `ExtendedDisplay.dmg` on a Mac with [installers/mac/build-dmg.sh](installers/mac/build-dmg.sh) (see [docs/mac.md](docs/mac.md)), drag to Applications, plug in the tablet, launch. (Mac host shares the Android app and protocol; HDR/native-virtual-display are Windows-only so far.)
+Build `ExtendedDisplay.dmg` on a Mac with [installers/mac/build-dmg.sh](installers/mac/build-dmg.sh), drag to Applications, plug in the tablet, launch — or run `MacHost` from the CLI over USB/Wi-Fi. The Mac host is **video-only** (same Android app, H.264 over TCP): touch, audio, encryption, discovery, 120 fps and the auto virtual display are Windows-only so far. Full guide + feature matrix: [docs/mac.md](docs/mac.md).
 
 ## Capabilities
 
