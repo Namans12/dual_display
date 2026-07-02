@@ -11,12 +11,16 @@ let package = Package(
         .executable(name: "MacHost", targets: ["MacHost"])
     ],
     targets: [
+        // ObjC shim confining all contact with the private CGVirtualDisplay API.
+        .target(name: "CVDShim"),
         .executableTarget(
             name: "MacHost",
+            dependencies: ["CVDShim"],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
+                .linkedFramework("CoreGraphics"),
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("VideoToolbox")
             ]

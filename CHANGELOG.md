@@ -6,11 +6,11 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
 (Apple silicon, M4) against receiver v9 on a Galaxy Tab S9 Ultra.
 
 - **Stage 1 — existing host + DMG verified on a real Mac (USB + Wi-Fi).**
-  - USB (`adb forward` + `--host 127.0.0.1`) streaming verified end-to-end
-    (tablet decodes H.264 at 60 works/s). Wi-Fi (`--host <tablet-ip>`)
-    exercised to the macOS Local Network permission gate; on this machine the
-    deny surfaced as instant `EHOSTUNREACH` while Apple-signed tools connected
-    fine — hence the retry+errno fixes below.
+  - USB (`adb forward` + `--host 127.0.0.1`) and Wi-Fi (`--host <tablet-ip>`)
+    streaming verified end-to-end (tablet decodes H.264 at 60 works/s). Wi-Fi
+    needs the one-time macOS Local Network grant; the deny surfaces as instant
+    `EHOSTUNREACH` while Apple-signed tools connect fine — hence the
+    retry+errno fixes below.
   - Fixed: `RunLoop.run()` (unavailable from async contexts — Swift 6) replaced
     with a SIGINT/SIGTERM-driven lifetime; clean "Stopping." teardown verified.
   - Fixed: one-shot connect → **retry every 2 s** until the tablet listener is
@@ -25,6 +25,32 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
   - Docs: macOS 15+ Local Network permission requirement (Wi-Fi), AirPlay
     Receiver-on-:5000 gotcha (a missing adb forward "connects" anyway and video
     goes nowhere), updated troubleshooting.
+
+- **Stage 2 — native virtual display (no more BetterDisplay).** By default the
+  Mac host now creates a **CGVirtualDisplay** at the tablet's native
+  2960x1848@60 (16:10, HiDPI — UI renders at 1480x924@2x so the framebuffer
+  stays at native tablet pixels) and captures *that*: a true extended display.
+  `--display N` keeps the old capture-an-existing-display path (mirror).
+  Verified on-device over USB and Wi-Fi: tablet shows the extended desktop
+  (own wallpaper/menu bar, full-bleed 16:10, crisp HiDPI text).
+  - All private-API contact is confined to a tiny ObjC shim target (`CVDShim`,
+    resolved via `NSClassFromString` — nothing private at link time). HiDPI
+    recipe on macOS 26: declare BOTH the full pixel mode and its half; with
+    `hiDPI=2` WindowServer pairs them into the Retina mode and defaults to it.
+  - Lifecycle (macOS 26 reality, all empirically verified): a virtual display
+    often **cannot be removed on demand** — releasing the object, process
+    death, and applySettings(nil/empty) can all leave it online, and
+    WindowServer's reclamation is timing-dependent. So the host **adopts** a
+    surviving instance of its own display (vendor/product match) instead of
+    failing on the identity collision, **parks** it corner-adjacent on stop
+    (zero shared edge — the idle cursor can't wander into it), and repositions
+    it beside the desktop on the next run. `--remove-display` is the explicit
+    escape hatch (`CGRestorePermanentDisplayConfiguration` — clears *all*
+    session virtual displays). Fresh displays come up **mirrored** and are
+    switched to extend + positioned right of the main display automatically.
+  - `--width/--height` now default to the captured display's native pixel
+    size (matching the Windows sender), so the virtual display streams
+    pixel-perfect without flags.
 
 ## v0.8.0 — 2026-07-02
 

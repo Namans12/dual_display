@@ -10,16 +10,18 @@ struct Options {
     var host = "127.0.0.1"
     var port = 5000
     var fps = 60
-    var width = 2560
-    var height = 1600
+    var width = 0    // 0 = native pixel size of the captured display
+    var height = 0
     var bitrate = 25_000_000
-    var displayIndex = 0
+    var displayIndex: Int?  // nil = create the native virtual display
+    var removeDisplay = false
 }
 
 enum MacHostError: Error, CustomStringConvertible {
     case invalidArgument(String)
     case noDisplays
     case displayIndexOutOfRange(Int)
+    case virtualDisplay(String)
     case socket(String)
     case encoder(OSStatus)
     case sampleBufferMissingImage
@@ -32,6 +34,8 @@ enum MacHostError: Error, CustomStringConvertible {
             return "No capturable displays were found."
         case .displayIndexOutOfRange(let index):
             return "Display index \(index) is out of range."
+        case .virtualDisplay(let message):
+            return message
         case .socket(let message):
             return message
         case .encoder(let status):
@@ -44,20 +48,31 @@ enum MacHostError: Error, CustomStringConvertible {
 
 func printUsage() {
     print("""
-    MacHost Phase 1
+    MacHost — extended display for an Android tablet
 
     Usage:
       MacHost --host <ip> [--port 5000] [--fps 60]
-              [--width 2560] [--height 1600] [--bitrate 25000000]
-              [--display 0]
+              [--width N --height N] [--bitrate 25000000]
+              [--display N]
+
+    By default MacHost creates a native virtual display (2960x1848@60, the
+    tablet's panel) and streams THAT — a true extended display. Pass
+    --display N to capture an existing display instead (0 = built-in panel,
+    i.e. a mirror). --width/--height default to the captured display's native
+    pixel size.
 
     Examples:
       MacHost --host 192.168.1.50 --port 5000
-      MacHost --host 127.0.0.1 --port 5000 --fps 60 --width 2560 --height 1600
+      MacHost --host 127.0.0.1 --display 0        # mirror the built-in panel
+      MacHost --remove-display                    # clear session virtual displays
 
     USB-C with ADB:
       adb forward tcp:5000 tcp:5000
       MacHost --host 127.0.0.1 --port 5000
+
+    The virtual display persists for the login session while idle (macOS can't
+    remove one on demand); MacHost parks it out of the cursor's way on stop and
+    reuses it on the next run. Logout — or --remove-display — clears it.
     """)
 }
 
@@ -100,6 +115,8 @@ func parseOptions(_ args: [String]) throws -> Options {
             options.bitrate = try readInt(arg)
         case "--display":
             options.displayIndex = try readInt(arg)
+        case "--remove-display":
+            options.removeDisplay = true
         default:
             throw MacHostError.invalidArgument("Unknown argument: \(arg)")
         }
@@ -115,8 +132,9 @@ func parseOptions(_ args: [String]) throws -> Options {
     guard (1...240).contains(options.fps) else {
         throw MacHostError.invalidArgument("--fps must be between 1 and 240")
     }
-    guard options.width > 0, options.height > 0 else {
-        throw MacHostError.invalidArgument("--width and --height must be positive")
+    guard options.width >= 0, options.height >= 0,
+          (options.width > 0) == (options.height > 0) else {
+        throw MacHostError.invalidArgument("--width and --height must be positive and given together")
     }
     guard options.bitrate > 0 else {
         throw MacHostError.invalidArgument("--bitrate must be positive")
@@ -203,12 +221,12 @@ final class H264AnnexBEncoder {
     private var sentParameterSets = false
     private var frameCount: Int64 = 0
 
-    init(options: Options, writer: TcpWriter) throws {
+    init(width: Int, height: Int, fps: Int, bitrate: Int, writer: TcpWriter) throws {
         self.writer = writer
-        self.width = Int32(options.width)
-        self.height = Int32(options.height)
-        self.fps = options.fps
-        self.bitrate = options.bitrate
+        self.width = Int32(width)
+        self.height = Int32(height)
+        self.fps = fps
+        self.bitrate = bitrate
 
         let callback: VTCompressionOutputCallback = { refcon, _, status, _, sampleBuffer in
             guard status == noErr, let refcon, let sampleBuffer else { return }
@@ -222,8 +240,8 @@ final class H264AnnexBEncoder {
 
         let createStatus = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
-            width: width,
-            height: height,
+            width: self.width,
+            height: self.height,
             codecType: kCMVideoCodecType_H264,
             encoderSpecification: nil,
             imageBufferAttributes: nil,
@@ -363,31 +381,19 @@ final class H264AnnexBEncoder {
 }
 
 final class ScreenCaptureHost: NSObject, SCStreamOutput {
-    private let options: Options
     private let encoder: H264AnnexBEncoder
     private var stream: SCStream?
 
-    init(options: Options, encoder: H264AnnexBEncoder) {
-        self.options = options
+    init(encoder: H264AnnexBEncoder) {
         self.encoder = encoder
     }
 
-    func start() async throws {
-        let content = try await SCShareableContent.current
-        let displays = content.displays
-        guard !displays.isEmpty else {
-            throw MacHostError.noDisplays
-        }
-        guard displays.indices.contains(options.displayIndex) else {
-            throw MacHostError.displayIndexOutOfRange(options.displayIndex)
-        }
-
-        let display = displays[options.displayIndex]
+    func start(display: SCDisplay, width: Int, height: Int, fps: Int) async throws {
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let configuration = SCStreamConfiguration()
-        configuration.width = options.width
-        configuration.height = options.height
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(options.fps))
+        configuration.width = width
+        configuration.height = height
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         configuration.queueDepth = 3
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         configuration.showsCursor = true
@@ -396,6 +402,13 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "screen.frames"))
         try await stream.startCapture()
         self.stream = stream
+    }
+
+    func stop() async {
+        if let stream {
+            try? await stream.stopCapture()
+        }
+        stream = nil
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
@@ -466,21 +479,100 @@ struct MacHostMain {
         }
     }
 
+    // Picks what to capture: --display N captures an existing display (index
+    // into ScreenCaptureKit's list, phase-1 behavior); the default creates the
+    // native virtual display sized to the tablet's panel — a true extended
+    // display, no third-party tool. Returns the SCDisplay, its native pixel
+    // size, and the VirtualDisplay handle to keep alive (nil for --display).
+    static func selectDisplay(_ options: Options) async throws
+        -> (display: SCDisplay, nativeWidth: Int, nativeHeight: Int, virtual: VirtualDisplay?) {
+        if let index = options.displayIndex {
+            let content = try await SCShareableContent.current
+            let displays = content.displays
+            guard !displays.isEmpty else { throw MacHostError.noDisplays }
+            guard displays.indices.contains(index) else {
+                throw MacHostError.displayIndexOutOfRange(index)
+            }
+            let display = displays[index]
+            // SCDisplay reports points; the display mode has the pixel size.
+            if let mode = CGDisplayCopyDisplayMode(display.displayID) {
+                return (display, mode.pixelWidth, mode.pixelHeight, nil)
+            }
+            return (display, display.width, display.height, nil)
+        }
+
+        guard let virtualDisplay = VirtualDisplay() else {
+            throw MacHostError.virtualDisplay(
+                "Could not create the virtual display (private CGVirtualDisplay API " +
+                "unavailable?). Pass --display N to capture an existing display.")
+        }
+        guard await virtualDisplay.waitUntilOnline(timeoutSeconds: 5.0) else {
+            throw MacHostError.virtualDisplay(
+                "Virtual display did not come online. Pass --display N to capture an " +
+                "existing display.")
+        }
+        virtualDisplay.configureAsExtension()
+        virtualDisplay.selectNativeMode()
+        // Let WindowServer settle the new arrangement before capturing.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // Fetch shareable content only now — a snapshot taken before the display
+        // registered would not include it.
+        let content = try await SCShareableContent.current
+        guard let display = content.displays.first(where: { $0.displayID == virtualDisplay.displayID }) else {
+            throw MacHostError.virtualDisplay(
+                "Virtual display is online but ScreenCaptureKit does not list it.")
+        }
+        print("Virtual display \(virtualDisplay.adopted ? "adopted from an earlier run" : "online"): " +
+              "\(VirtualDisplay.width)x\(VirtualDisplay.height)@\(Int(VirtualDisplay.refreshHz)) " +
+              "(id \(virtualDisplay.displayID))")
+        return (display, VirtualDisplay.width, VirtualDisplay.height, virtualDisplay)
+    }
+
     static func main() async {
         setvbuf(stdout, nil, _IOLBF, 0)  // line-buffered: Finder launches log to a file
         do {
             let options = try parseOptions(CommandLine.arguments)
+
+            if options.removeDisplay {
+                print("Restoring the permanent display configuration. This removes " +
+                      "session virtual displays (including other apps') and any " +
+                      "unsaved display arrangement changes.")
+                VirtualDisplay.removeAllSessionDisplays()
+                exit(0)
+            }
+
             print("Connecting to \(options.host):\(options.port)")
-            print("Capture: ScreenCaptureKit display \(options.displayIndex)")
-            print("Encode: H.264 VideoToolbox, \(options.width)x\(options.height) @ \(options.fps) FPS")
 
             let writer = await connectWithRetry(host: options.host, port: options.port)
-            let encoder = try H264AnnexBEncoder(options: options, writer: writer)
-            let host = ScreenCaptureHost(options: options, encoder: encoder)
-            try await host.start()
+
+            let selection = try await selectDisplay(options)
+            let encodeWidth = options.width > 0 ? options.width : selection.nativeWidth
+            let encodeHeight = options.height > 0 ? options.height : selection.nativeHeight
+            if let index = options.displayIndex {
+                print("Capture: ScreenCaptureKit display \(index)")
+            } else {
+                print("Capture: virtual display (extended desktop)")
+            }
+            print("Encode: H.264 VideoToolbox, \(encodeWidth)x\(encodeHeight) @ \(options.fps) FPS")
+
+            let encoder = try H264AnnexBEncoder(width: encodeWidth, height: encodeHeight,
+                                                fps: options.fps, bitrate: options.bitrate,
+                                                writer: writer)
+            let host = ScreenCaptureHost(encoder: encoder)
+            try await host.start(display: selection.display, width: encodeWidth,
+                                 height: encodeHeight, fps: options.fps)
 
             print("Streaming. Press Ctrl+C to stop.")
             await parkUntilSignal()
+            await host.stop()
+            if let virtualDisplay = selection.virtual {
+                // The display can't be removed on macOS 26 — park it out of the
+                // cursor's reach; the next run adopts it. Logout removes it.
+                virtualDisplay.parkInactive()
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                print("Virtual display parked (reused on the next run; logout removes " +
+                      "it, or run MacHost --remove-display).")
+            }
             print("Stopping.")
             exit(0)
         } catch {

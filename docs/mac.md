@@ -1,13 +1,13 @@
 # Mac Host
 
-The Mac host turns the same Android tablet + receiver app into a second screen
-for a Mac. It shares the Android APK and the plaintext H.264-Annex-B-over-TCP
-video protocol with the Windows host, but it is an earlier, **video-only** phase
-of the project:
+The Mac host turns the same Android tablet + receiver app into a true
+**extended display** for a Mac. It shares the Android APK and the
+H.264-Annex-B-over-TCP video protocol with the Windows host:
 
 ```text
-macOS ScreenCaptureKit → VideoToolbox H.264 → TCP :5000 (USB via adb, or Wi-Fi)
-                                                → Android MediaCodec → screen
+native virtual display (CGVirtualDisplay, 2960x1848@60 HiDPI)
+  → ScreenCaptureKit → VideoToolbox H.264 → TCP :5000 (USB via adb, or Wi-Fi)
+  → Android MediaCodec → screen
 ```
 
 ## Mac vs Windows — what works where
@@ -15,7 +15,7 @@ macOS ScreenCaptureKit → VideoToolbox H.264 → TCP :5000 (USB via adb, or Wi-
 | Capability | Windows host (v0.8.0) | Mac host |
 |---|---|---|
 | Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264, TCP only |
-| Auto virtual display (true extend) | ✅ bundled IddCx driver | ➖ mirror by default; extend needs a third-party virtual display (below) |
+| Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848@60 HiDPI (default) |
 | Tablet discovery | ✅ UDP broadcast | ➖ manual `--host <ip>` (or USB adb forward) |
 | Touch / S Pen → host | ✅ | ❌ (tablet is display-only) |
 | Desktop audio → tablet | ✅ | ❌ |
@@ -92,34 +92,42 @@ the tablet's IP (`Ready • Wi-Fi 192.168.x.x`), then:
 
 Both machines must be on the same network; guest/AP-isolated Wi-Fi blocks this.
 
-## Mirror vs extended
+## Extended by default (mirror on request)
 
-`MacHost` captures an **existing** display — `--display 0` (the default) is
-usually the built-in panel, i.e. a **mirror**. For a true extended display:
+By default `MacHost` creates a **native virtual display** — no BetterDisplay,
+no dummy plug — sized to the tablet's panel: 2960×1848@60, HiDPI (UI renders
+at 1480×924@2x, the framebuffer stays at native tablet pixels), positioned to
+the right of the built-in display, and captures *that*. Drag windows off the
+right edge of your Mac and they appear on the tablet.
 
-- Create a virtual display with a tool like **BetterDisplay**, set it to a
-  16:10 resolution (the tablet is 2960×1848), then pass its index:
-  `--display 1` (indexes follow ScreenCaptureKit's display list order; try 1, 2…).
-- Or capture a second physical display if one is attached.
-- A native, no-third-party virtual display (`CGVirtualDisplay`) is the next Mac
-  milestone — on Windows this is what the bundled IddCx driver already does.
+- `--display N` skips the virtual display and captures an existing display by
+  ScreenCaptureKit index instead — `--display 0` is the built-in panel, i.e. a
+  **mirror**.
+- Virtual-display lifecycle (macOS can't remove a virtual display on demand):
+  while streaming it sits right of the main display; on stop MacHost **parks**
+  it corner-adjacent (no shared edge, so the cursor can't wander into it) and
+  **reuses** it on the next run. Logging out removes it for real, and
+  `MacHost --remove-display` is the explicit escape hatch (note: it restores
+  the saved display configuration, which also clears other apps' session
+  virtual displays).
 
 ## Flags
 
 ```text
---host <ip>      tablet IP (or 127.0.0.1 with adb forward)   [127.0.0.1]
---port N         tablet video port                            [5000]
---fps N          capture/encode frame rate                    [60]
---width N        encoded width                                [2560]
---height N       encoded height                               [1600]
---bitrate N      H.264 bitrate, bits/sec                      [25000000]
---display N      ScreenCaptureKit display index               [0]
+--host <ip>       tablet IP (or 127.0.0.1 with adb forward)   [127.0.0.1]
+--port N          tablet video port                            [5000]
+--fps N           capture/encode frame rate                    [60]
+--width N         encoded width                                [0 = native]
+--height N        encoded height                               [0 = native]
+--bitrate N       H.264 bitrate, bits/sec                      [25000000]
+--display N       capture existing SCK display N (mirror)      [off = virtual]
+--remove-display  clear session virtual displays and exit
 ```
 
-Match `--width/--height` to the captured display's **aspect ratio** or the
-image gets squeezed: MacBook panels are 16:10, so the 2560×1600 default is
-right; for a 16:9 external display use e.g. `--width 2560 --height 1440` (the
-tablet letterboxes automatically).
+`--width/--height` default to the captured display's native pixel size (the
+virtual display is 16:10 like the tablet, so nothing to match). When capturing
+a 16:9 display with `--display N`, pass e.g. `--width 2560 --height 1440` to
+keep the aspect ratio — the tablet letterboxes automatically.
 
 ## Troubleshooting
 
@@ -150,5 +158,7 @@ tablet letterboxes automatically).
 - Video-only: no touch-back, no audio, no encryption, no discovery — those live
   in the Windows host (see [SECURITY.md](../SECURITY.md) and the README feature
   table).
-- Virtual display creation requires a third-party tool for now.
+- The idle virtual display persists (parked) until logout or
+  `--remove-display` — macOS offers no per-display removal (verified: object
+  release, process death and empty-mode applySettings can all leave it online).
 - Fixed capture size; no 120 fps auto-mode-switch, no HDR.
