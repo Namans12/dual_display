@@ -77,7 +77,7 @@ namespace ExtendedDisplay
             var lblFps = new Label { Text = "FPS:", Location = new Point(12, 28), AutoSize = true };
             cmbFps = new ComboBox { Location = new Point(70, 25), Width = 70, DropDownStyle = ComboBoxStyle.DropDownList };
             cmbFps.Items.AddRange(new object[] { "60", "120" }); cmbFps.SelectedIndex = 0;
-            var iFps = Info(28, "120 fps drops the virtual display to 1920x1200 (the tablet upscales) so the pipeline can sustain 120 Hz. 60 fps runs at native 2960x1848.", cmbFps);
+            var iFps = Info(28, "120 fps drops the virtual display to 2560x1600 (the tablet upscales) so the pipeline can sustain 120 Hz. 60 fps runs at native 2960x1848.", cmbFps);
             var lblEnc = new Label { Text = "Encoder:", Location = new Point(158, 28), AutoSize = true };
             cmbEnc = new ComboBox { Location = new Point(224, 25), Width = 96, DropDownStyle = ComboBoxStyle.DropDownList };
             cmbEnc.Items.AddRange(new object[] { "Auto", "nvenc", "qsv", "mf", "amf", "x264" }); cmbEnc.SelectedIndex = 0;

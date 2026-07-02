@@ -61,10 +61,11 @@ Improvements (Wi-Fi robustness + usability + security + desktop audio).
 
 - **Smooth 120 fps.** At native 2960×1848, 120 Hz overruns the capture+encode
   throughput (~656 Mpix/s — past 4K60), so frames back up and even the cursor
-  drags. When `--fps 120` is selected the sender now drops the virtual display to a
-  lighter 1920×1200 mode the pipeline sustains at 120 Hz (the tablet upscales to
-  its panel); it restores native automatically for ≤60 fps. Verified: ffmpeg holds
-  **fps=119 at 0.989× speed** (real-time) where native 60 fps ran at 0.9× (behind).
+  drags. When `--fps 120` is selected the sender now drops the virtual display to
+  **2560×1600**, the sharpest mode the pipeline sustains at 120 Hz (measured:
+  ffmpeg holds **fps=120 at 0.997× speed** over 60 s; falls back to 1920×1200 if
+  that mode is unavailable). The tablet upscales to its panel; native resolution
+  is restored automatically for ≤60 fps.
 - **UDP path robustness:** a bigger socket send buffer (4 MB) so a keyframe's
   fragment burst isn't dropped by the OS/Wi-Fi driver. (Intra-refresh was tried but
   **reverted** — removing periodic IDRs left the decoder with nothing to resync on
