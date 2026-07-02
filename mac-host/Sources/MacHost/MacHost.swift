@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreMedia
 import CoreVideo
+import CryptoKit
 import Darwin
 import Foundation
 import ScreenCaptureKit
@@ -19,6 +20,8 @@ struct Options {
     var selfTest = false
     var wifi = false
     var hostExplicit = false  // --host given → skip discovery
+    var cryptoSelfTest = false
+    var deriveKeyCode: String?
 }
 
 enum MacHostError: Error, CustomStringConvertible {
@@ -83,9 +86,8 @@ func printUsage() {
       adb forward tcp:5001 tcp:5001
       MacHost --host 127.0.0.1 --port 5000
 
-    The virtual display persists for the login session while idle (macOS can't
-    remove one on demand); MacHost parks it out of the cursor's way on stop and
-    reuses it on the next run. Logout — or --remove-display — clears it.
+    The virtual display exists while MacHost runs and is removed when it exits
+    (WindowServer reclaims it). --remove-display is a rarely-needed safety valve.
     """)
 }
 
@@ -137,6 +139,10 @@ func parseOptions(_ args: [String]) throws -> Options {
             options.noTouch = true
         case "--selftest":
             options.selfTest = true
+        case "--crypto-selftest":
+            options.cryptoSelfTest = true
+        case "--derive-key":
+            options.deriveKeyCode = try requireValue(arg)
         default:
             throw MacHostError.invalidArgument("Unknown argument: \(arg)")
         }
@@ -231,8 +237,54 @@ final class TcpWriter {
     }
 }
 
-final class H264AnnexBEncoder {
+// Sends encoded NAL units to the tablet. Plaintext: writes each Annex-B NAL
+// (start code included) straight to the socket — an Annex-B byte stream the
+// receiver's splitter consumes. Encrypted (paired): sends the 4-byte 'EXVE'
+// marker once, then each NAL as [4B BE length][12B nonce][ct][16B tag] (nonce
+// domain 0x01), which the receiver drains until keyed and then decrypts — the
+// same wire format as the Windows encrypted-TCP path.
+//
+// A write failure (the tablet closed the connection) sets `alive` false so the
+// supervisor loop can reconnect. SIGPIPE is ignored process-wide, so the failing
+// write returns an error here instead of killing the process.
+final class VideoSender {
     private let writer: TcpWriter
+    private let sealer: Sealer?
+    let alive = AtomicFlag()
+
+    init(writer: TcpWriter, key: SymmetricKey?) throws {
+        self.writer = writer
+        self.sealer = key.map { Sealer(key: $0, domain: 0x01) }
+        alive.set()
+        if sealer != nil {
+            try writer.write(Data([0x45, 0x58, 0x56, 0x45]))  // 'EXVE'
+        }
+    }
+
+    // Called serially from the VideoToolbox output callback.
+    func send(nal: Data) throws {
+        do {
+            guard let sealer else {
+                try writer.write(nal)
+                return
+            }
+            guard let frame = sealer.seal(nal) else {
+                throw MacHostError.socket("Failed to encrypt a video frame")
+            }
+            let n = UInt32(frame.count)
+            var out = Data([UInt8(n >> 24), UInt8((n >> 16) & 0xff),
+                            UInt8((n >> 8) & 0xff), UInt8(n & 0xff)])
+            out.append(frame)
+            try writer.write(out)
+        } catch {
+            alive.clear()  // tablet dropped — supervisor reconnects
+            throw error
+        }
+    }
+}
+
+final class H264AnnexBEncoder {
+    private let sender: VideoSender
     private let width: Int32
     private let height: Int32
     private let fps: Int
@@ -241,8 +293,8 @@ final class H264AnnexBEncoder {
     private var sentParameterSets = false
     private var frameCount: Int64 = 0
 
-    init(width: Int, height: Int, fps: Int, bitrate: Int, writer: TcpWriter) throws {
-        self.writer = writer
+    init(width: Int, height: Int, fps: Int, bitrate: Int, sender: VideoSender) throws {
+        self.sender = sender
         self.width = Int32(width)
         self.height = Int32(height)
         self.fps = fps
@@ -287,9 +339,17 @@ final class H264AnnexBEncoder {
     }
 
     deinit {
+        finish()
+    }
+
+    // Flushes and tears down the compression session. Called explicitly between
+    // reconnects (after capture has stopped, so no new frames race the callback)
+    // and again from deinit. Idempotent.
+    func finish() {
         if let session {
             VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(session)
+            self.session = nil
         }
     }
 
@@ -358,7 +418,7 @@ final class H264AnnexBEncoder {
 
             var packet = Data([0x00, 0x00, 0x00, 0x01])
             packet.append(UnsafeRawPointer(dataPointer.advanced(by: offset)).assumingMemoryBound(to: UInt8.self), count: nalLength)
-            try writer.write(packet)
+            try sender.send(nal: packet)
             offset += nalLength
         }
     }
@@ -395,7 +455,7 @@ final class H264AnnexBEncoder {
 
             var packet = Data([0x00, 0x00, 0x00, 0x01])
             packet.append(pointer, count: size)
-            try writer.write(packet)
+            try sender.send(nal: packet)
         }
     }
 }
@@ -446,36 +506,20 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
     }
 }
 
-// Keeps the process alive until SIGINT/SIGTERM, then returns so callers can tear
-// down (virtual display, in-flight sockets) before exiting. RunLoop.run() is
-// unavailable from async contexts; frames arrive on their own queues anyway.
-func parkUntilSignal() async {
-    final class Once: @unchecked Sendable {
-        private let lock = NSLock()
-        private var fired = false
-        func first() -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            if fired { return false }
-            fired = true
-            return true
-        }
+// Signal sources are retained for the whole process; SIGINT/SIGTERM set the
+// shared stop flag so the supervisor loop exits and runs its teardown (park the
+// virtual display, stop the touch bridge). RunLoop.run() is unavailable from
+// async contexts, and the loop polls g_stop between short sleeps anyway.
+var g_signalSources: [DispatchSourceSignal] = []
+
+func installSignalHandlers() {
+    for sig in [SIGINT, SIGTERM] {
+        signal(sig, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+        source.setEventHandler { g_stop.set() }
+        source.activate()
+        g_signalSources.append(source)
     }
-    let once = Once()
-    var sources: [DispatchSourceSignal] = []
-    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        for sig in [SIGINT, SIGTERM] {
-            signal(sig, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-            source.setEventHandler {
-                g_stop.set()
-                if once.first() { continuation.resume() }
-            }
-            source.activate()
-            sources.append(source)
-        }
-    }
-    withExtendedLifetime(sources) {}
 }
 
 @main
@@ -483,9 +527,9 @@ struct MacHostMain {
     // Retries until the tablet listener is reachable: covers the receiver-app
     // launch race, brief rebind gaps between sessions, and the one-time macOS
     // Local Network permission grant (first Wi-Fi run).
-    static func connectWithRetry(host: String, port: Int) async -> TcpWriter {
+    static func connectWithRetry(host: String, port: Int) async -> TcpWriter? {
         var announced = false
-        while true {
+        while !g_stop.isSet {
             do {
                 return try TcpWriter(host: host, port: port)
             } catch {
@@ -498,6 +542,7 @@ struct MacHostMain {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
+        return nil  // stopping
     }
 
     // Picks what to capture: --display N captures an existing display (index
@@ -551,11 +596,35 @@ struct MacHostMain {
 
     static func main() async {
         setvbuf(stdout, nil, _IOLBF, 0)  // line-buffered: Finder launches log to a file
+        signal(SIGPIPE, SIG_IGN)  // a dead-socket write must return an error, not kill us
+        installSignalHandlers()   // SIGINT/SIGTERM → g_stop → clean teardown
         do {
             var options = try parseOptions(CommandLine.arguments)
 
             if options.selfTest {
                 exit(runSelfTests())
+            }
+            if options.cryptoSelfTest {
+                exit(runCryptoSelfTest())
+            }
+            if let code = options.deriveKeyCode {
+                guard let key = PairingCrypto.deriveKey(code: code) else {
+                    fputs("derive failed\n", stderr); exit(1)
+                }
+                print(PairingCrypto.hex(key))
+                exit(0)
+            }
+
+            // Pairing: EXTDISPLAY_KEY (env, not argv, so it never shows in a
+            // process listing) → derive the shared key and encrypt the link.
+            var pairKey: SymmetricKey?
+            if let code = ProcessInfo.processInfo.environment["EXTDISPLAY_KEY"], !code.isEmpty {
+                guard let key = PairingCrypto.deriveKey(code: code) else {
+                    fputs("Error: could not derive the pairing key from EXTDISPLAY_KEY\n", stderr)
+                    exit(1)
+                }
+                pairKey = key
+                print("Pairing enabled — encrypting the link (enter the code on the tablet).")
             }
 
             if options.removeDisplay {
@@ -582,10 +651,8 @@ struct MacHostMain {
                 if g_stop.isSet { exit(0) }
             }
 
-            print("Connecting to \(options.host):\(options.port)")
-
-            let writer = await connectWithRetry(host: options.host, port: options.port)
-
+            // Display + touch are set up once; the video connection restarts on
+            // its own below.
             let selection = try await selectDisplay(options)
             let encodeWidth = options.width > 0 ? options.width : selection.nativeWidth
             let encodeHeight = options.height > 0 ? options.height : selection.nativeHeight
@@ -596,33 +663,54 @@ struct MacHostMain {
             }
             print("Encode: H.264 VideoToolbox, \(encodeWidth)x\(encodeHeight) @ \(options.fps) FPS")
 
-            let encoder = try H264AnnexBEncoder(width: encodeWidth, height: encodeHeight,
-                                                fps: options.fps, bitrate: options.bitrate,
-                                                writer: writer)
-            let host = ScreenCaptureHost(encoder: encoder)
-            try await host.start(display: selection.display, width: encodeWidth,
-                                 height: encodeHeight, fps: options.fps)
-
             var touchBridge: TouchBridge?
             if !options.noTouch {
                 let port = touchPort(forHost: options.host, videoPort: options.port)
                 touchBridge = TouchBridge(host: options.host, port: port,
-                                          displayID: selection.display.displayID)
+                                          displayID: selection.display.displayID,
+                                          key: pairKey)
                 touchBridge?.start()
             }
 
-            print("Streaming. Press Ctrl+C to stop.")
-            await parkUntilSignal()
-            touchBridge?.stop()
-            await host.stop()
-            if let virtualDisplay = selection.virtual {
-                // The display can't be removed on macOS 26 — park it out of the
-                // cursor's reach; the next run adopts it. Logout removes it.
-                virtualDisplay.parkInactive()
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                print("Virtual display parked (reused on the next run; logout removes " +
-                      "it, or run MacHost --remove-display).")
+            // Supervisor loop: connect, stream until the tablet drops (SIGPIPE is
+            // ignored process-wide, so a dead-socket write returns an error and
+            // clears the sender's `alive` flag), then reconnect — like the
+            // Windows host restarting the stream on disconnect.
+            var reconnecting = false
+            while !g_stop.isSet {
+                print(reconnecting ? "Reconnecting to \(options.host):\(options.port)…"
+                                   : "Connecting to \(options.host):\(options.port)")
+                guard let writer = await connectWithRetry(host: options.host, port: options.port) else {
+                    break  // stopping
+                }
+
+                let videoSender = try VideoSender(writer: writer, key: pairKey)
+                let encoder = try H264AnnexBEncoder(width: encodeWidth, height: encodeHeight,
+                                                    fps: options.fps, bitrate: options.bitrate,
+                                                    sender: videoSender)
+                let host = ScreenCaptureHost(encoder: encoder)
+                try await host.start(display: selection.display, width: encodeWidth,
+                                     height: encodeHeight, fps: options.fps)
+                print(reconnecting ? "Reconnected. Streaming." : "Streaming. Press Ctrl+C to stop.")
+
+                // Wait until the tablet drops the stream or the user quits.
+                while !g_stop.isSet && videoSender.alive.isSet {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
+                await host.stop()
+                encoder.finish()  // flush the session before its reference drops
+                if !g_stop.isSet {
+                    print("Stream ended (tablet disconnected or app closed). Reconnecting…")
+                    reconnecting = true
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // gentle backoff
+                }
             }
+
+            touchBridge?.stop()
+            // Hold the reference until here so the display lives for the whole run;
+            // exiting (below) is what removes it — WindowServer reclaims a virtual
+            // display when its owner exits.
+            _ = selection.virtual
             print("Stopping.")
             exit(0)
         } catch {

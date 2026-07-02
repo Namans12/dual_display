@@ -19,7 +19,7 @@ native virtual display (CGVirtualDisplay, 2960x1848@60 HiDPI)
 | Tablet discovery | ✅ UDP broadcast | ✅ `--wifi` (UDP broadcast), or `--host <ip>` |
 | Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse (stylus rides the mouse path) |
 | Desktop audio → tablet | ✅ | ❌ |
-| PIN pairing + AES-256-GCM encryption | ✅ all channels | ❌ (stream is plaintext) |
+| PIN pairing + AES-256-GCM encryption | ✅ all channels | ✅ video + touch (audio n/a) |
 | 120 fps mode switch, HDR | ✅ | ❌ (fixed capture size, SDR) |
 | Settings GUI | ✅ | ➖ CLI + a DMG launcher that automates USB |
 
@@ -111,13 +111,13 @@ right edge of your Mac and they appear on the tablet.
 - `--display N` skips the virtual display and captures an existing display by
   ScreenCaptureKit index instead — `--display 0` is the built-in panel, i.e. a
   **mirror**.
-- Virtual-display lifecycle (macOS can't remove a virtual display on demand):
-  while streaming it sits right of the main display; on stop MacHost **parks**
-  it corner-adjacent (no shared edge, so the cursor can't wander into it) and
-  **reuses** it on the next run. Logging out removes it for real, and
-  `MacHost --remove-display` is the explicit escape hatch (note: it restores
-  the saved display configuration, which also clears other apps' session
-  virtual displays).
+- Virtual-display lifecycle: the display exists only while MacHost runs and is
+  **removed when it exits** (WindowServer reclaims a virtual display when its
+  owner exits — verified for both quit and kill). A fast restart that finds the
+  previous instance still online adopts it instead of making a duplicate.
+  `MacHost --remove-display` is a rarely-needed safety valve (it restores the
+  saved display configuration, which also clears other apps' session virtual
+  displays).
 
 ## Flags
 
@@ -139,6 +139,32 @@ right edge of your Mac and they appear on the tablet.
 virtual display is 16:10 like the tablet, so nothing to match). When capturing
 a 16:9 display with `--display N`, pass e.g. `--width 2560 --height 1440` to
 keep the aspect ratio — the tablet letterboxes automatically.
+
+## Pairing + encryption (optional)
+
+For an untrusted LAN, the Mac host encrypts the **video and touch** channels
+with AES-256-GCM, exactly like the Windows host. Set a pairing code in the
+`EXTDISPLAY_KEY` environment variable (never on the command line, so it can't
+show in a process listing) and enter the same code on the tablet:
+
+```bash
+EXTDISPLAY_KEY=AB2CD3EF .build/release/MacHost --host 127.0.0.1
+```
+
+Both sides derive the same key — `PBKDF2-HMAC-SHA256(code, "ExtDisplay/v1",
+200000)` — so no key material crosses the network. The tablet remembers the
+derived key, so you type the code **once, ever**. Video is sent as the
+`EXVE`-marked encrypted stream (the tablet shows nothing until you enter the
+code, then decrypts on the same connection); touch packets are sealed 56-byte
+frames the host rejects on a wrong code (no cursor injection from strangers).
+Audio isn't a Mac feature yet, so there's no audio channel to encrypt.
+
+Verify the KDF matches the other platforms byte-for-byte:
+
+```bash
+.build/release/MacHost --derive-key TESTCODE   # 3961c9…c381 (same as Windows --derive-key)
+.build/release/MacHost --crypto-selftest       # KDF + GCM round-trip + wrong-key rejection
+```
 
 ## Troubleshooting
 
@@ -166,10 +192,11 @@ keep the aspect ratio — the tablet letterboxes automatically.
 ## Limitations (honest)
 
 - H.264 only (HEVC needs codec negotiation the Mac phase never grew).
-- Touch is single-pointer mouse (no real multi-touch or pen pressure yet); no
-  audio, no encryption, no discovery — those live in the Windows host (see
-  [SECURITY.md](../SECURITY.md) and the README feature table).
-- The idle virtual display persists (parked) until logout or
-  `--remove-display` — macOS offers no per-display removal (verified: object
-  release, process death and empty-mode applySettings can all leave it online).
+- Touch is single-pointer mouse (no real multi-touch or pen pressure yet).
+- No desktop-audio channel yet (so nothing to encrypt there); the audio path
+  lives only in the Windows host (see [SECURITY.md](../SECURITY.md) and the
+  README feature table).
+- The virtual display can't be removed *without* exiting MacHost — releasing
+  it while the process runs leaves it online (macOS 26). It is removed on exit,
+  so in practice this only matters if you wanted to drop it mid-session.
 - Fixed capture size; no 120 fps auto-mode-switch, no HDR.

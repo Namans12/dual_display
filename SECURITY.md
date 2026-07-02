@@ -44,8 +44,10 @@ Goals: (a) only a **paired** tablet can connect/control, (b) the streams are
   domain-separates audio from video (`0x01`) and touch (`0x00`). The 16-byte
   format header (sample rate / channels) stays plaintext — it carries no secret.
 - Platform crypto only, no third-party deps: **Windows BCrypt** (PBKDF2 + AES-GCM)
-  on the sender; **javax.crypto** (`PBKDF2WithHmacSHA256`, `AES/GCM/NoPadding`) on
-  the receiver.
+  on the Windows sender; **CommonCrypto** (`CCKeyDerivationPBKDF`) + **CryptoKit**
+  (`AES.GCM`) on the Mac sender; **javax.crypto** (`PBKDF2WithHmacSHA256`,
+  `AES/GCM/NoPadding`) on the receiver. All three derive a byte-identical key
+  (verified: `--derive-key TESTCODE` → `3961c9…c381` on Windows and Mac).
 
 **Handshake:** first framed message is an encrypted known magic; if the receiver
 can't authenticate it, it reports "wrong pairing code" and disconnects.
@@ -105,3 +107,12 @@ can't authenticate it, it reports "wrong pairing code" and disconnects.
 
 Opt-in: streams stay open (today's behaviour) unless a pairing code is set, so a
 trusted home LAN needn't change. Encryption engages automatically once paired.
+
+**Mac host parity (v0.9.0):** the Mac sender implements the same pairing and
+encryption for the channels it has — **video** (`EXVE` marker + length-prefixed
+AES-GCM NALs, nonce prefix `0x01`) and **touch** (56-byte sealed v2 packets,
+nonce prefix `0x00`, monotonic-counter replay guard that rebases on a new nonce
+prefix so a tablet re-key doesn't stall). It has no desktop-audio channel yet,
+so there's nothing on `0x02` to encrypt. Verified on-device: correct code →
+video decodes and touch injects; wrong code → no video, touch auth-fails and is
+dropped (no injection).

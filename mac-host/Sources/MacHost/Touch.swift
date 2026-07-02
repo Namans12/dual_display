@@ -1,5 +1,6 @@
 import ApplicationServices
 import CoreGraphics
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -148,13 +149,15 @@ final class TouchBridge {
     private let host: String
     private let port: Int
     private let injector: MouseInjector
+    private let key: SymmetricKey?  // nil = plaintext
     private let stopped = AtomicFlag()
     private var currentFd: Int32 = -1
 
-    init(host: String, port: Int, displayID: CGDirectDisplayID) {
+    init(host: String, port: Int, displayID: CGDirectDisplayID, key: SymmetricKey? = nil) {
         self.host = host
         self.port = port
         self.injector = MouseInjector(displayID: displayID)
+        self.key = key
     }
 
     func start() {
@@ -191,9 +194,13 @@ final class TouchBridge {
                 continue
             }
             currentFd = fd
-            print("Touch: connected — tablet touches control the Mac.")
+            print("Touch: connected — tablet touches control the Mac\(key != nil ? " (encrypted)" : "").")
             announced = false
-            readLoop(fd)
+            if key != nil {
+                encryptedReadLoop(fd)
+            } else {
+                readLoop(fd)
+            }
             close(fd)
             currentFd = -1
             injector.releaseStuckButton()
@@ -246,6 +253,40 @@ final class TouchBridge {
         }
     }
 
+    // Paired: each packet is a 56-byte AES-GCM frame [12B nonce][28B ct][16B
+    // tag]. TCP keeps us frame-aligned from the first byte; an auth failure
+    // means a wrong pairing code (or tampering) — nothing to resync to, so drop
+    // the connection (no injection from strangers). Replay guard: the 8-byte
+    // big-endian nonce counter must strictly increase.
+    private func encryptedReadLoop(_ fd: Int32) {
+        guard let key else { return }
+        let frameSize = 12 + TouchPacket.byteCount + 16  // 56
+        var frameBytes = [UInt8](repeating: 0, count: frameSize)
+        var lastCounter: UInt64 = 0
+        var lastPrefix: [UInt8]? = nil
+        while !stopped.isSet {
+            guard recvFull(fd, &frameBytes, frameSize) else { return }
+            let frame = Data(frameBytes)
+            guard let plain = Sealer.open(frame, key: key), plain.count == TouchPacket.byteCount else {
+                print("Touch pairing/auth failed - check the code on the tablet.")
+                return  // drop the connection
+            }
+            // Replay guard, per nonce prefix: within one prefix the counter must
+            // strictly increase; a new prefix is a legitimate re-key (the tablet
+            // resets its counter to 0), so accept and rebase.
+            if let prefix = Sealer.noncePrefix(frame), let counter = Sealer.nonceCounter(frame) {
+                if prefix == lastPrefix {
+                    if counter <= lastCounter { continue }  // replay / reorder
+                } else {
+                    lastPrefix = prefix
+                }
+                lastCounter = counter
+            }
+            guard let parsed = parseTouchPacket([UInt8](plain)) else { continue }
+            injector.handle(parsed)
+        }
+    }
+
     private func recvFull(_ fd: Int32, _ buffer: inout [UInt8], _ length: Int) -> Bool {
         var got = 0
         while got < length {
@@ -281,6 +322,11 @@ final class AtomicFlag: @unchecked Sendable {
     func set() {
         lock.lock()
         value = true
+        lock.unlock()
+    }
+    func clear() {
+        lock.lock()
+        value = false
         lock.unlock()
     }
 }

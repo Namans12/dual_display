@@ -4,16 +4,15 @@ import Foundation
 
 // Owns the native virtual display (private CGVirtualDisplay API via CVDShim).
 //
-// macOS 26 lifecycle reality (all verified on-machine): once created, a virtual
-// display cannot be individually removed — releasing the object, process exit,
-// and applySettings with nil/empty modes all leave it online. Only
-// CGRestorePermanentDisplayConfiguration() clears session virtual displays, and
-// that resets every session display change (including other apps'). So instead
-// of create/destroy per run, MacHost adopts an existing instance of its own
-// display (matched by vendor/product id) when one survives from an earlier run,
-// and on graceful stop parks it corner-adjacent to the desktop where the cursor
-// cannot wander into it. Logout (WindowServer restart) removes it for real;
-// `--remove-display` is the explicit escape hatch.
+// macOS 26 lifecycle (all verified on-machine): WindowServer reclaims a virtual
+// display when its owning process EXITS — clean quit or kill, gone within a
+// second. What does NOT remove it is releasing the object (or applySettings with
+// nil/empty modes) while the process keeps running: it stays online as long as
+// its owner lives. So MacHost just holds the display for the run and lets process
+// exit be the teardown. If a fast restart finds a not-yet-reclaimed instance of
+// our own display (matched by vendor/product id) it adopts it rather than making
+// a duplicate. `--remove-display` (CGRestorePermanentDisplayConfiguration) is a
+// safety valve if one ever lingers.
 final class VirtualDisplay {
     // Galaxy Tab S9 Ultra: 2960x1848 (16:10) on a 14.6" panel.
     static let width = 2960
@@ -107,21 +106,10 @@ final class VirtualDisplay {
         CGDisplaySetDisplayMode(displayID, best, nil)
     }
 
-    // Parks the (unremovable) display diagonally at the desktop's bottom-right
-    // corner: with no shared edge the cursor cannot cross into it while idle.
-    // The next run adopts it and moves it back beside the desktop.
-    func parkInactive() {
-        var config: CGDisplayConfigRef?
-        guard CGBeginDisplayConfiguration(&config) == .success, let config else { return }
-        let anchor = CGDisplayBounds(CGMainDisplayID())
-        CGConfigureDisplayOrigin(config, displayID,
-                                 Int32(anchor.maxX.rounded()), Int32(anchor.maxY.rounded()))
-        CGCompleteDisplayConfiguration(config, .forSession)
-    }
-
-    // Escape hatch (`--remove-display`): macOS 26 offers no per-display removal,
-    // so this restores the saved permanent configuration — which clears session
-    // virtual displays (including other apps') and session arrangement changes.
+    // Escape hatch (`--remove-display`): rarely needed since process exit
+    // reclaims the display, but if one ever lingers this restores the saved
+    // permanent configuration — which clears session virtual displays (including
+    // other apps') and session arrangement changes.
     static func removeAllSessionDisplays() {
         CGRestorePermanentDisplayConfiguration()
     }

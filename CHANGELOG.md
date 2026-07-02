@@ -37,17 +37,16 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
     resolved via `NSClassFromString` — nothing private at link time). HiDPI
     recipe on macOS 26: declare BOTH the full pixel mode and its half; with
     `hiDPI=2` WindowServer pairs them into the Retina mode and defaults to it.
-  - Lifecycle (macOS 26 reality, all empirically verified): a virtual display
-    often **cannot be removed on demand** — releasing the object, process
-    death, and applySettings(nil/empty) can all leave it online, and
-    WindowServer's reclamation is timing-dependent. So the host **adopts** a
-    surviving instance of its own display (vendor/product match) instead of
-    failing on the identity collision, **parks** it corner-adjacent on stop
-    (zero shared edge — the idle cursor can't wander into it), and repositions
-    it beside the desktop on the next run. `--remove-display` is the explicit
-    escape hatch (`CGRestorePermanentDisplayConfiguration` — clears *all*
-    session virtual displays). Fresh displays come up **mirrored** and are
-    switched to extend + positioned right of the main display automatically.
+  - Lifecycle (macOS 26, empirically verified): WindowServer reclaims the
+    virtual display when MacHost **exits** (clean quit or kill — gone within a
+    second), so the host just holds it for the run and lets exit be the
+    teardown. What does *not* remove it is releasing the object while the
+    process keeps running, so a fast restart may find the previous instance
+    still online — the host **adopts** its own display (vendor/product match)
+    rather than making a duplicate. Fresh displays come up **mirrored** (even
+    as main) and are switched to extend + positioned right of the main display
+    automatically. `--remove-display`
+    (`CGRestorePermanentDisplayConfiguration`) is a rarely-needed safety valve.
   - `--width/--height` now default to the captured display's native pixel
     size (matching the Windows sender), so the virtual display streams
     pixel-perfect without flags.
@@ -81,6 +80,33 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
   the first tablet that answers `EXTDISP!v1|<name>|<port>` — no IP typing.
   Verified on-device: found `samsung SM-X910 at 192.168.1.19` and streamed
   (video + touch) over Wi-Fi. `--selftest` gained a reply-parser check.
+
+- **Stage 4b — PIN pairing + AES-256-GCM (video + touch).** Set a code in the
+  `EXTDISPLAY_KEY` env var (not argv) and the Mac host encrypts video and touch
+  exactly like the Windows host. KDF is **byte-identical** across platforms —
+  `CommonCrypto` `CCKeyDerivationPBKDF` (PBKDF2-HMAC-SHA256, salt
+  `ExtDisplay/v1`, 200 000 iters) + `CryptoKit` `AES.GCM` — verified against an
+  independent vector (`--derive-key TESTCODE` → `3961c9…c381`) and the Windows
+  output. `--crypto-selftest` (KDF deterministic + golden-matched, GCM
+  round-trip, wrong-key rejected) mirrors the Windows self-test.
+  - Video: sends the 4-byte `EXVE` marker, then each NAL as
+    `[4B len][12B nonce][ct][16B tag]` (nonce domain `0x01`).
+  - Touch: reads 56-byte sealed frames, drops the connection on auth failure
+    (wrong code → no cursor injection). Replay guard rebases on a new nonce
+    prefix, so the tablet re-keying its Sealer (on the EXVE latch or a code
+    entry) doesn't stall touch.
+  - Verified on-device (USB): correct code → video decodes and touch injects
+    pixel-exact through the encrypted path; wrong code → no video, touch
+    auth-fails and is rejected. Plaintext still works unchanged (the tablet's
+    saved-key mismatch auto-detect displays it and unseals touch).
+- **Fixed: the Mac host no longer crashes when the tablet disconnects.** A write
+  to the closed video socket raised **SIGPIPE**, killing the process (exit 141)
+  — any tablet-side disconnect (app closed, Wi-Fi blip, wrong-key drain) took
+  the host down. SIGPIPE is now ignored process-wide, and the video stream runs
+  under a **supervisor loop** that reconnects on disconnect (like the Windows
+  host restarting the stream), setting up the virtual display and touch bridge
+  once. Verified: killing the tablet app mid-stream → host survives → reconnects
+  and resumes when the app reopens.
 
 ## v0.8.0 — 2026-07-02
 
