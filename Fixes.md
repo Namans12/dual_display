@@ -21,13 +21,51 @@ mix to 16-bit stereo, and send **raw PCM** length-prefixed to the tablet's
   ~25 Mbps video on USB/5 GHz — and skipping a codec avoids encode/decode latency
   and a dependency. If audio ever rides a constrained link, Opus is the upgrade.
 
-**A/V sync (tunable, not exact):** the `AudioTrack` is built with a short buffer
-(`minBuf * 2`) so audio doesn't lag the video by much, and `track.write()` blocks
-to pace capture. Audio and video are **independent streams** with no shared clock,
-so lip-sync is approximate (typically audio slightly ahead). Good enough for
-system sounds / video playback; tightening it would need PTS timestamps and a
-shared clock (a larger change). Silent passages: WASAPI returns no packets, so we
-send nothing and the tablet's buffer drains to silence (no click).
+**A/V sync (tunable, not exact):** the `AudioTrack` is built with a small buffer
+(`minBuf`) so audio tracks the video closely, and `track.write()` blocks to pace
+capture. Audio and video are **independent streams** with no shared clock, so
+lip-sync is approximate. Good enough for system sounds / video playback; tightening
+it would need PTS timestamps and a shared clock (a larger change). Silent passages:
+WASAPI returns no packets, so we send nothing and the tablet's buffer drains to
+silence (no click). Note: `AudioTrack.PERFORMANCE_MODE_LOW_LATENCY` made `build()`
+throw on the S9 Ultra (silently, so audio never started) — dropped; the small
+buffer alone gives the latency win.
+
+**Startup race → 1-byte ACK.** `adb forward` accepts the sender's *local* socket
+even before the tablet app has bound its port, so a successful `connect()` doesn't
+mean a live receiver. The audio channel is **write-only** (unlike touch, which
+reads and thus notices a dead relay), so without a check it streamed into a black
+hole during the app-launch race. Fix: the tablet sends a 1-byte ACK after reading
+the format header; the sender waits for it (4 s) and reconnects otherwise.
+
+**"Mute PC speakers" is safe — loopback survives endpoint mute.** Measured on the
+S9 Ultra host: with the default render endpoint muted (`IAudioEndpointVolume::
+SetMute`), WASAPI loopback still captured the full mix (peaks non-zero,
+`AUDCLNT_BUFFERFLAGS_SILENT` clear). So muting silences the PC's speakers while the
+tablet keeps its audio — the only no-extra-driver way to get "sound follows to the
+tablet." `--mute-local` (GUI: "Mute PC speakers") does this, restoring on exit and
+self-healing a stuck mute via a marker file if the sender is force-killed.
+
+## Encrypted video showed no picture until reconnect — 'EXVE' marker
+
+The tablet's TCP video loop chose encrypted-vs-plaintext framing **once**, when it
+accepted the connection, from whether a pairing key was set. But the user enters
+the code *after* the sender has already connected, so the connection was locked
+into the plaintext (Annex-B) path and fed the encrypted bytes to the splitter →
+garbage → no picture. It only ever worked if the code happened to be entered before
+the (stable) connection was accepted.
+
+First attempt — restart/re-accept the receiver on pairing (close the socket to
+force a re-accept with the key set) — was fragile: the sender's blocking `send()`
+hung on the half-closed socket (stalling ffmpeg to fps≈11), and recreating the
+`MediaCodec` on the same surface raced. Reverted.
+
+Fix: the sender prefixes the encrypted stream with a 4-byte plaintext marker
+(`EXVE`). The tablet reads it up front, so it knows the stream is encrypted and
+reads `videoSealer` **per frame**: before pairing it drains frames (no garbage
+decode), and the moment you enter the code the next frames decrypt and the picture
+appears — same connection, no reconnect. Plaintext streams (no marker) start with
+an Annex-B start code and are pushed back to the splitter unchanged.
 
 ---
 

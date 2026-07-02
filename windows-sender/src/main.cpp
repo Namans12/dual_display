@@ -21,6 +21,7 @@
 #include <bcrypt.h>
 #include <mmdeviceapi.h>   // WASAPI: IMMDeviceEnumerator (desktop-audio loopback)
 #include <audioclient.h>   // WASAPI: IAudioClient / IAudioCaptureClient
+#include <endpointvolume.h> // IAudioEndpointVolume (optional "mute PC while streaming")
 #include <mmreg.h>         // WAVE_FORMAT_* tags for the mix format
 
 #include <array>
@@ -42,6 +43,7 @@ constexpr int kRemoteTouchPort = 5001;  // touch uplink listener inside the app
 constexpr int kDiscoveryPort = 5002;    // UDP discovery port on the tablet
 constexpr int kRemoteAudioPort = 5003;  // desktop-audio listener inside the app
 constexpr uint32_t kAudioMagic = 0x45584155;  // 'EXAU' (audio format header)
+constexpr uint32_t kEncVideoMagic = 0x45585645;  // 'EXVE' (encrypted-video stream marker)
 constexpr ULONGLONG kProvenUptimeMs = 5000;
 
 // UDP video framing (low-latency Wi-Fi path). Each NAL unit is split into
@@ -174,6 +176,7 @@ struct Options {
     bool wifi = false;           // discover the tablet over the LAN, skip adb
     bool udp = false;            // low-latency UDP video (needs --wifi or --host)
     bool audio = false;          // stream desktop audio (WASAPI loopback) to the tablet
+    bool muteLocal = false;      // mute the PC's own speakers while streaming audio
     bool listDisplays = false;
 };
 
@@ -1314,8 +1317,52 @@ void mixToStereoS16(const BYTE* src, UINT32 frames, const WAVEFORMATEX* fmt,
     }
 }
 
+// Marker so a force-killed sender (the GUI's Stop terminates the process, skipping
+// the restore) doesn't leave the PC muted: written while muted, deleted on restore,
+// and cleared at next startup by restoreLocalMuteIfNeeded().
+std::string muteMarkerPath() {
+    char localAppData[MAX_PATH] = {};
+    DWORD len = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+        const std::string dir = std::string(localAppData) + "\\ExtendedDisplay";
+        CreateDirectoryA(dir.c_str(), nullptr);
+        return dir + "\\local-muted.flag";
+    }
+    return "local-muted.flag";
+}
+
+// Mute/unmute the default render endpoint (the PC's speakers). COM must already be
+// initialized on the calling thread. WASAPI loopback still captures the full mix
+// while muted (verified), so the tablet keeps getting audio.
+bool setEndpointMute(bool mute) {
+    IMMDeviceEnumerator* en = nullptr;
+    IMMDevice* dev = nullptr;
+    IAudioEndpointVolume* vol = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                   __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&en))) &&
+        SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &dev)) &&
+        SUCCEEDED(dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void**>(&vol)))) {
+        ok = SUCCEEDED(vol->SetMute(mute ? TRUE : FALSE, nullptr));
+    }
+    if (vol) vol->Release();
+    if (dev) dev->Release();
+    if (en) en->Release();
+    return ok;
+}
+
+// Self-heal: if a prior run muted the PC and died before restoring, unmute now.
+void restoreLocalMuteIfNeeded() {
+    if (!fileExists(muteMarkerPath())) return;
+    const bool coInit = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+    setEndpointMute(false);
+    if (coInit) CoUninitialize();
+    DeleteFileA(muteMarkerPath().c_str());
+}
+
 void runAudioBridge(const std::string adb, const std::string host, int localPort,
-                    bool adbMode) {
+                    bool adbMode, bool muteLocal) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
 
     IMMDeviceEnumerator* enumr = nullptr;
@@ -1356,6 +1403,17 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { cleanup(); CoUninitialize(); return; }
 
+    // Optionally silence the PC's own speakers so sound only comes from the tablet.
+    // Loopback still captures the full mix while muted (verified), so the tablet
+    // keeps its audio. A marker file lets the next launch un-mute if we're killed.
+    bool didMute = false;
+    if (muteLocal && setEndpointMute(true)) {
+        didMute = true;
+        FILE* mf = nullptr;
+        if (fopen_s(&mf, muteMarkerPath().c_str(), "w") == 0 && mf) fclose(mf);
+        std::cout << "Desktop audio: PC speakers muted (sound plays on the tablet only).\n";
+    }
+
     const std::string connectHost = adbMode ? "127.0.0.1" : host;
     const int connectPort = adbMode ? localPort : kRemoteAudioPort;
 
@@ -1382,21 +1440,42 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
                    reinterpret_cast<char*>(&noDelay), sizeof(noDelay));
 
+        AesGcm aenc;
+        const bool enc = g_pairKey && aenc.init(*g_pairKey);
+        uint8_t aPrefix[4] = {0x02, 0, 0, 0};
+        if (enc) BCryptGenRandom(nullptr, aPrefix + 1, 3, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        uint64_t aCtr = 0;
+
+        // Header: [4 magic][4 rate][2 channels][1 bits][1 flags]. flags bit0 =
+        // encrypted, so the tablet stays silent until paired (else it would play
+        // the encrypted bytes as raw PCM = white noise while you type the code).
         unsigned char hdr[12] = {
             static_cast<unsigned char>(kAudioMagic >> 24), static_cast<unsigned char>(kAudioMagic >> 16),
             static_cast<unsigned char>(kAudioMagic >> 8),  static_cast<unsigned char>(kAudioMagic),
             static_cast<unsigned char>(sampleRate >> 24),  static_cast<unsigned char>(sampleRate >> 16),
             static_cast<unsigned char>(sampleRate >> 8),   static_cast<unsigned char>(sampleRate),
             0, 2,   // channels = 2
-            0, 16   // bits = 16
+            16,     // bits = 16
+            static_cast<unsigned char>(enc ? 1 : 0)  // flags: bit0 = encrypted
         };
         if (!sendAll(sock, hdr, 12)) { closesocket(sock); sleepInterruptible(1000); continue; }
 
-        AesGcm aenc;
-        const bool enc = g_pairKey && aenc.init(*g_pairKey);
-        uint8_t aPrefix[4] = {0x02, 0, 0, 0};
-        if (enc) BCryptGenRandom(nullptr, aPrefix + 1, 3, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-        uint64_t aCtr = 0;
+        // Wait for the tablet's 1-byte ACK. adb-forward accepts our local socket even
+        // before the app has bound its port (startup race), so a successful connect()
+        // doesn't mean a live receiver; without this we'd stream audio (a write-only
+        // channel, so no error surfaces) into a dead relay forever. Reconnect if the
+        // ACK doesn't arrive.
+        {
+            DWORD ackTimeout = 4000;
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<char*>(&ackTimeout), sizeof(ackTimeout));
+            unsigned char ack = 0;
+            if (recv(sock, reinterpret_cast<char*>(&ack), 1, 0) != 1) {
+                // No live receiver yet (app still launching / relay not ready) — retry
+                // quietly, like the touch bridge does.
+                closesocket(sock); sleepInterruptible(1000); continue;
+            }
+        }
 
         client->Reset();  // drop anything buffered from a prior session
         client->Start();
@@ -1444,6 +1523,11 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
         client->Stop();
         closesocket(sock);
         if (!g_stop.load()) sleepInterruptible(1000);
+    }
+    if (didMute) {
+        setEndpointMute(false);
+        DeleteFileA(muteMarkerPath().c_str());
+        std::cout << "Desktop audio: PC speakers un-muted.\n";
     }
     cleanup();
     WSACleanup();
@@ -1564,6 +1648,7 @@ void printUsage() {
         "  --hdr             HDR10 output (10-bit BT.2020 PQ; implies --hevc)\n"
         "  --no-touch        Disable tablet touch -> mouse injection\n"
         "  --audio           Stream desktop audio (PC playback) to the tablet\n"
+        "  --mute-local      With --audio: mute the PC's own speakers (tablet only)\n"
         "  --wifi            Stream over Wi-Fi: auto-discover the tablet on the LAN\n"
         "  --udp             Low-latency UDP video over Wi-Fi (needs --wifi or --host)\n"
         "  --host IP         Advanced: stream straight to IP (WiFi), skip adb\n"
@@ -1622,6 +1707,8 @@ Options parseArgs(int argc, char** argv) {
             options.audio = true;
         } else if (arg == "--no-audio") {
             options.audio = false;
+        } else if (arg == "--mute-local") {
+            options.muteLocal = true;
         } else if (arg == "--wifi") {
             options.wifi = true;
         } else if (arg == "--udp") {
@@ -1832,6 +1919,15 @@ ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host
     }
     BOOL noDelay = TRUE;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&noDelay), sizeof(noDelay));
+
+    // Announce this as an encrypted stream with a 4-byte plaintext marker before any
+    // frames. The tablet reads it up front, so it knows to expect length-prefixed
+    // AES-GCM frames and can drain them (no garbage decode) until you enter the code,
+    // then decrypt on the same connection — no reconnect, no forced socket close.
+    unsigned char vmagic[4] = {
+        static_cast<unsigned char>(kEncVideoMagic >> 24), static_cast<unsigned char>(kEncVideoMagic >> 16),
+        static_cast<unsigned char>(kEncVideoMagic >> 8),  static_cast<unsigned char>(kEncVideoMagic) };
+    if (!sendAll(sock, vmagic, 4)) { closesocket(sock); WSACleanup(); return 0; }
 
     SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
     HANDLE readPipe = nullptr, writePipe = nullptr;
@@ -2125,6 +2221,10 @@ int main(int argc, char** argv) {
             if (keyEnv) free(keyEnv);
         }
 
+        // Self-heal: if a previous run muted the PC for tablet-only audio and was
+        // force-killed before restoring, un-mute now.
+        restoreLocalMuteIfNeeded();
+
         const std::string exeDir = exeDirectory();
 
         if (options.listDisplays) {
@@ -2257,7 +2357,7 @@ int main(int argc, char** argv) {
 
         if (options.audio) {
             std::thread(runAudioBridge, adb, options.host, options.port + 3,
-                        options.host.empty())
+                        options.host.empty(), options.muteLocal)
                 .detach();
             std::cout << "Desktop audio bridge active (PC audio plays on the tablet).\n";
         }

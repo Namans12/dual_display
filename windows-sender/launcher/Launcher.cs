@@ -32,7 +32,7 @@ namespace ExtendedDisplay
         const string VddInstanceId = @"ROOT\DISPLAY\0000";
 
         RadioButton rbUsb, rbWifi;
-        CheckBox chkUdp, chkTouch, chkHevc, chkHdr, chkEncrypt, chkAudio;
+        CheckBox chkUdp, chkTouch, chkHevc, chkHdr, chkEncrypt, chkAudio, chkMute;
         ComboBox cmbFps, cmbEnc;
         TextBox txtBit, txtIp;
         Button btnStart, btnStop;
@@ -49,7 +49,7 @@ namespace ExtendedDisplay
             exePath = ResolveSenderPath();
 
             Text = "Extended Display";
-            ClientSize = new Size(380, 496);
+            ClientSize = new Size(380, 522);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -80,20 +80,22 @@ namespace ExtendedDisplay
             grpVid.Controls.AddRange(new Control[] { lblFps, cmbFps, lblEnc, cmbEnc, lblBit, txtBit });
 
             // ── Options ───────────────────────────────────────────────────
-            var grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(356, 156) };
+            var grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(356, 182) };
             chkTouch = new CheckBox { Text = "Touch input  (tablet controls PC)", Location = new Point(12, 22), AutoSize = true, Checked = true };
             chkHevc = new CheckBox { Text = "HEVC / H.265  (better at high FPS)", Location = new Point(12, 48), AutoSize = true };
             chkHdr = new CheckBox { Text = "HDR  (experimental - HDR video only; desktop looks washed)", Location = new Point(12, 74), AutoSize = true };
             chkAudio = new CheckBox { Text = "Desktop audio  (PC sound plays on the tablet)", Location = new Point(12, 100), AutoSize = true };
-            chkEncrypt = new CheckBox { Text = "Encrypt  (require pairing code on the tablet)", Location = new Point(12, 126), AutoSize = true };
+            chkMute = new CheckBox { Text = "› Mute PC speakers  (sound only on the tablet)", Location = new Point(30, 126), AutoSize = true, Enabled = false };
+            chkAudio.CheckedChanged += (s, e) => { chkMute.Enabled = chkAudio.Checked; if (!chkAudio.Checked) chkMute.Checked = false; };
+            chkEncrypt = new CheckBox { Text = "Encrypt  (require pairing code on the tablet)", Location = new Point(12, 152), AutoSize = true };
             chkEncrypt.CheckedChanged += OnEncryptToggled;
-            grpOpt.Controls.AddRange(new Control[] { chkTouch, chkHevc, chkHdr, chkAudio, chkEncrypt });
+            grpOpt.Controls.AddRange(new Control[] { chkTouch, chkHevc, chkHdr, chkAudio, chkMute, chkEncrypt });
 
             // ── Pairing code + status + buttons ───────────────────────────
-            lblCode = new Label { Text = "", Location = new Point(14, 386), Size = new Size(356, 22), ForeColor = Color.MediumBlue, Font = new Font("Consolas", 11f, FontStyle.Bold) };
-            lblStatus = new Label { Text = "Ready.", Location = new Point(14, 410), Size = new Size(356, 20), ForeColor = Color.DimGray };
-            btnStart = new Button { Text = "Start Streaming", Location = new Point(12, 434), Size = new Size(170, 36), BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-            btnStop = new Button { Text = "Stop", Location = new Point(198, 434), Size = new Size(170, 36), Enabled = false };
+            lblCode = new Label { Text = "", Location = new Point(14, 412), Size = new Size(356, 22), ForeColor = Color.MediumBlue, Font = new Font("Consolas", 11f, FontStyle.Bold) };
+            lblStatus = new Label { Text = "Ready.", Location = new Point(14, 436), Size = new Size(356, 20), ForeColor = Color.DimGray };
+            btnStart = new Button { Text = "Start Streaming", Location = new Point(12, 460), Size = new Size(170, 36), BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            btnStop = new Button { Text = "Stop", Location = new Point(198, 460), Size = new Size(170, 36), Enabled = false };
             btnStart.Click += OnStart;
             btnStop.Click += OnStop;
 
@@ -238,6 +240,7 @@ namespace ExtendedDisplay
             else if (chkHevc.Checked) sb.Append(" --hevc");
             if (!chkTouch.Checked) sb.Append(" --no-touch");
             if (chkAudio.Checked) sb.Append(" --audio");
+            if (chkMute.Checked && chkMute.Enabled) sb.Append(" --mute-local");
             if (cmbEnc.SelectedIndex > 0) sb.Append(" --encoder " + cmbEnc.SelectedItem);
             if ((string)cmbFps.SelectedItem != "60") sb.Append(" --fps " + cmbFps.SelectedItem);
             string bit = txtBit.Text.Trim();

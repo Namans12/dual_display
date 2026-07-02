@@ -52,6 +52,7 @@ private const val TOUCH_PORT = 5001
 private const val DISCOVERY_PORT = 5002
 private const val AUDIO_PORT = 5003
 private const val AUDIO_MAGIC = 0x45584155 // 'EXAU'
+private const val ENC_VIDEO_MAGIC = 0x45585645 // 'EXVE' (encrypted-video stream marker)
 private const val TOUCH_MAGIC = 0x48585450 // 'HXTP'
 private const val DISCOVERY_QUERY = "EXTDISP?v1"
 private const val DISCOVERY_REPLY_PREFIX = "EXTDISP!v1|"
@@ -226,17 +227,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         if (code.isEmpty()) {
             pairingKey = null
             touchUplink.setKey(null)
-            receiver?.setKey(null)
             audioReceiver.setKey(null)
+            receiver?.setKey(null)
             return
         }
         if (code.length != 8) return  // wait until the full code is entered
         try {
             val key = Crypto.deriveKey(code)
             pairingKey = key
-            touchUplink.setKey(key)
-            receiver?.setKey(key)   // decrypt the video too
-            audioReceiver.setKey(key)  // decrypt desktop audio too
+            touchUplink.setKey(key)     // touch encrypts per-packet (reads key live)
+            audioReceiver.setKey(key)   // audio decrypts per-frame (reads key live)
+            receiver?.setKey(key)       // video decrypts per-frame (drained until now)
             Log.i(TAG, "Paired: encryption enabled (key ${Crypto.hex(key).take(8)}…)")
             statusView.text = "Paired — link encrypted"
             // Show the completed code (green), then tuck the panel away — deferred so
@@ -477,7 +478,9 @@ private class H264TcpReceiver(
     private var codec: MediaCodec? = null
     @Volatile private var videoSealer: Sealer? = null
 
-    /** Set the pairing key to decrypt the (UDP) video, or null for plaintext. */
+    /** Set the pairing key to decrypt the video, or null for plaintext. Read live
+     *  per-frame, so entering the code mid-stream starts decryption without a
+     *  reconnect (the encrypted branch drains frames until this is set). */
     fun setKey(key: ByteArray?) { videoSealer = key?.let { Sealer(it) } }
 
     // Both transports push complete NAL units here; one decode loop consumes
@@ -518,10 +521,30 @@ private class H264TcpReceiver(
                 server!!.accept().use { socket ->
                     socket.tcpNoDelay = true
                     onStatus("Connected (USB/TCP): ${socket.inetAddress.hostAddress}")
-                    val s = videoSealer
-                    if (s != null) {
-                        // Paired: length-prefixed encrypted frames [4B BE len][nonce+ct+tag].
-                        val inp = java.io.DataInputStream(socket.getInputStream())
+                    // Peek 4 bytes. Encrypted streams begin with the 'EXVE' marker;
+                    // plaintext streams begin with an Annex-B start code (push those
+                    // back for the splitter).
+                    val pin = java.io.PushbackInputStream(
+                        java.io.BufferedInputStream(socket.getInputStream()), 4)
+                    val magic = ByteArray(4)
+                    var got = 0
+                    while (got < 4) {
+                        val r = pin.read(magic, got, 4 - got)
+                        if (r < 0) break
+                        got += r
+                    }
+                    if (got < 4) return@use
+                    val m = ((magic[0].toInt() and 0xff) shl 24) or
+                            ((magic[1].toInt() and 0xff) shl 16) or
+                            ((magic[2].toInt() and 0xff) shl 8) or
+                            (magic[3].toInt() and 0xff)
+                    if (m == ENC_VIDEO_MAGIC) {
+                        // Length-prefixed encrypted frames [4B BE len][nonce+ct+tag].
+                        // videoSealer is read PER-FRAME: before pairing it's null so we
+                        // DRAIN frames (no garbage decode / no picture-of-noise); once
+                        // you enter the code the next frames decrypt and video appears —
+                        // all on the same connection, no reconnect.
+                        val inp = java.io.DataInputStream(pin)
                         val lenBuf = ByteArray(4)
                         while (running.get()) {
                             inp.readFully(lenBuf)
@@ -532,11 +555,13 @@ private class H264TcpReceiver(
                             if (n <= 0 || n > (8 shl 20)) break  // sanity / desync
                             val frame = ByteArray(n)
                             inp.readFully(frame)
+                            val s = videoSealer ?: continue          // not keyed yet -> drain
                             val nal = s.open(frame, 0, frame.size) ?: break  // wrong code / tamper
                             nalQueue.put(nal)
                         }
                     } else {
-                        val splitter = AnnexBNalSplitter(socket.getInputStream())
+                        pin.unread(magic, 0, got)  // those bytes start the Annex-B stream
+                        val splitter = AnnexBNalSplitter(pin)
                         while (running.get()) {
                             val nal = splitter.nextNal() ?: break
                             nalQueue.put(nal)
@@ -921,6 +946,7 @@ private class AudioReceiver {
                     while (running.get()) {
                         val sock = s.accept()
                         sock.tcpNoDelay = true
+                        Log.i(TAG, "AudioReceiver client connected: ${sock.inetAddress?.hostAddress}")
                         val old = current
                         current = sock
                         if (old != null) try { old.close() } catch (_: Exception) {}
@@ -945,6 +971,7 @@ private class AudioReceiver {
             if (beInt(hdr, 0) != AUDIO_MAGIC) return
             val rate = beInt(hdr, 4)
             val channels = beShort(hdr, 8)
+            val encrypted = (hdr[11].toInt() and 1) != 0  // stream is AES-GCM per frame
             if (rate !in 8000..192000) return
             val mask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO
                        else AudioFormat.CHANNEL_OUT_MONO
@@ -960,11 +987,21 @@ private class AudioReceiver {
                     .setSampleRate(rate)
                     .setChannelMask(mask)
                     .build())
-                .setBufferSizeInBytes(minBuf * 2)  // ~short buffer to keep A/V roughly in sync
+                // Small buffer so audio doesn't lag the video; blocking write() still
+                // paces us and the LAN can keep it fed. (LOW_LATENCY perf mode was
+                // tried but made build() throw on this device — dropped.) Bump toward
+                // minBuf*2 if a device underruns/glitches.
+                .setBufferSizeInBytes(minBuf)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             track.play()
-            Log.i(TAG, "Audio: playing ${rate}Hz ${channels}ch")
+            // 1-byte ACK: tells the sender a live receiver actually got the header.
+            // adb-forward accepts the sender's local socket even before this app has
+            // bound 5003 (startup race), so without this the sender would stream into
+            // a dead relay forever. The sender waits for this byte and reconnects if
+            // it never arrives.
+            try { sock.getOutputStream().write(0xAC); sock.getOutputStream().flush() } catch (_: Exception) {}
+            Log.i(TAG, "Audio: playing ${rate}Hz ${channels}ch enc=$encrypted")
 
             val lenBuf = ByteArray(4)
             while (running.get() && current === sock) {
@@ -973,12 +1010,17 @@ private class AudioReceiver {
                 if (n <= 0 || n > (1 shl 20)) break  // sanity / desync
                 val frame = ByteArray(n)
                 inp.readFully(frame)
-                val s = sealer
-                val pcm = if (s != null) (s.open(frame, 0, frame.size) ?: break) else frame
-                track.write(pcm, 0, pcm.size)  // blocks = natural pacing/backpressure
+                if (encrypted) {
+                    val s = sealer ?: continue        // paired stream, not keyed yet -> stay silent
+                    val pcm = s.open(frame, 0, frame.size) ?: break  // wrong key / tamper
+                    track.write(pcm, 0, pcm.size)     // blocks = natural pacing/backpressure
+                } else {
+                    track.write(frame, 0, frame.size)
+                }
             }
-        } catch (_: Exception) {
-            // socket closed or superseded by a newer connection
+        } catch (e: Exception) {
+            // Socket closed / superseded is normal; log others (e.g. AudioTrack build).
+            if (running.get() && current === sock) Log.i(TAG, "audio serve ended: ${e.message}")
         } finally {
             try { track?.stop() } catch (_: Exception) {}
             try { track?.release() } catch (_: Exception) {}

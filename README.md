@@ -22,6 +22,7 @@ ExtendedDisplaySender.exe --hdr        # HDR10 (10-bit, auto-enables Windows HDR
 ExtendedDisplaySender.exe --hevc       # H.265 (sharper at high resolution)
 ExtendedDisplaySender.exe --wifi --udp # wireless, low-latency UDP video
 ExtendedDisplaySender.exe --audio      # also play PC sound on the tablet
+ExtendedDisplaySender.exe --audio --mute-local  # ...and mute the PC's own speakers
 ExtendedDisplaySender.exe --bitrate 40000   # crisper text
 ```
 
@@ -37,7 +38,7 @@ Build `ExtendedDisplay.dmg` on a Mac with [installers/mac/build-dmg.sh](installe
 | **Codecs** | H.264 + **HEVC** (HDR uses HEVC Main10). Encoder auto-ladder: NVENC → Intel QSV → AMD AMF → **Media Foundation** → x264/x265, so it works on any GPU. |
 | **Transport** | **USB** (adb) and **Wi-Fi** with zero-config discovery. Video over reliable TCP or low-latency **UDP**; touch always on reliable TCP. |
 | **Input** | Multi-touch, two-finger scroll/pinch, long-press right-click, and **S Pen** with pressure / hover / eraser → injected as real Windows touch + pen. |
-| **Audio** | Optional **desktop audio** (PC → tablet) via WASAPI loopback → the tablet's speakers. No extra driver; encrypted with the rest of the link when paired. |
+| **Audio** | Optional **desktop audio** (PC → tablet) via WASAPI loopback → the tablet's speakers. No extra driver; encrypted with the rest of the link when paired. Optional "Mute PC speakers" makes sound play on the tablet only. |
 | **Security** | Optional **PIN pairing + AES-256-GCM** on every channel (video, touch, audio) for untrusted Wi-Fi — see [SECURITY.md](SECURITY.md). |
 
 ## How It Works

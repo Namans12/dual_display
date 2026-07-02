@@ -27,6 +27,16 @@ UDP packets -> reassembler ─────────┴-> NAL queue -> MediaCo
 The app listens on both TCP and UDP port 5000 and decodes whichever arrives, so
 the host picks the transport (USB/TCP for reliability, Wi-Fi/UDP for latency).
 
+### Encrypted video (TCP)
+
+When paired, the sender proxies ffmpeg and sends a 4-byte plaintext marker `EXVE`
+(`0x45585645`) first, then length-prefixed AES-GCM frames `[4B BE len][12B nonce]
+[ciphertext][16B tag]` (nonce prefix `0x01`). The tablet detects the marker and
+reads the pairing key **per frame**: before the code is entered it drains frames
+(no garbage decode), and once keyed the next frames decrypt on the same connection
+(no reconnect). A plaintext stream instead begins with an Annex-B start code, which
+the tablet feeds to the splitter.
+
 ### UDP video framing
 
 Each NAL unit is split into datagrams with a 12-byte big-endian header:
@@ -101,6 +111,11 @@ Then, repeated:
 ```
 
 When a pairing code is set the payload is `[12B nonce][ciphertext][16B tag]`
-(nonce prefix `0x02`); otherwise it is the raw PCM. The tablet plays it through an
+(nonce prefix `0x02`); otherwise it is the raw PCM. `flags` bit 0 marks the stream
+encrypted, so the tablet stays silent until the code is entered (no noise). After
+reading the header the tablet sends a **1-byte ACK** (`0xAC`); the sender waits for
+it before streaming, so audio survives the app-launch race (adb-forward accepts the
+local socket before the app binds its port). The tablet plays through an
 `AudioTrack` (MODE_STREAM), newest-connection-wins. Audio and video are separate
-streams with no shared clock, so lip-sync is approximate.
+streams with no shared clock, so lip-sync is approximate. `--mute-local` mutes the
+PC's own endpoint while streaming (loopback still captures the mix).

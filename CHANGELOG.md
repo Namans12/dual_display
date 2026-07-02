@@ -11,10 +11,26 @@ Improvements (Wi-Fi robustness + usability + security).
   dedicated channel (TCP 5003; adb-forwarded on USB). The tablet plays it through
   an `AudioTrack` (newest-connection-wins, like touch). When encryption is on the
   audio is **AES-256-GCM** too (nonce prefix `0x02`, domain-separated from video
-  `0x01` / touch `0x00`); the 12-byte format header stays plaintext. Verified
-  on-device over USB: open link → `Audio: playing 48000Hz 2ch`; paired (correct
-  code) → continuous decrypted playback with a stable connection. A/V sync is
-  approximate (short AudioTrack buffer) and tunable — see [Fixes.md](Fixes.md).
+  `0x01` / touch `0x00`); a 12-byte plaintext format header carries rate/channels
+  and an "encrypted" flag so the tablet stays **silent until you pair** (no
+  static-noise while typing the code). A 1-byte ACK handshake makes the sender wait
+  for a live receiver, so audio survives the app-launch race (adb-forward accepts
+  the local socket before the app binds its port). Verified on-device (USB): open →
+  `Audio: playing 48000Hz 2ch`; paired → continuous decrypted playback, stable.
+  - **"Mute PC speakers" sub-option** (CLI: `--mute-local`) silences the PC's own
+    output so sound comes only from the tablet. WASAPI loopback still captures the
+    muted mix (verified), so the tablet keeps audio. A marker file self-heals a
+    stuck mute if the sender is force-killed (the next launch un-mutes).
+  - Latency: the `AudioTrack` uses a small buffer so audio tracks the video closely
+    (A/V sync is approximate — no shared clock; tunable). See [Fixes.md](Fixes.md).
+
+- **Encrypted video now displays reliably regardless of when you pair.** The
+  tablet chose encrypted-vs-plaintext once at connect, so entering the code *after*
+  the sender connected left it decoding ciphertext as plaintext (no picture). The
+  sender now prefixes the encrypted stream with a plaintext `EXVE` marker; the
+  tablet recognises it, **drains frames until you key in, then decrypts on the same
+  connection** — no reconnect, no garbage. Verified: with Desktop audio *and*
+  Encrypt on, the desktop appears on the tablet right after the code is entered.
 
 - **Security — PIN pairing + encrypted link (stages 1–3).** Opt-in "Encrypt" in
   the GUI mints an 8-char pairing code; you type it on the tablet once. Both derive
