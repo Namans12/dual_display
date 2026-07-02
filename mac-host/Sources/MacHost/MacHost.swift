@@ -22,6 +22,7 @@ struct Options {
     var hostExplicit = false  // --host given → skip discovery
     var cryptoSelfTest = false
     var deriveKeyCode: String?
+    var hevc = false
 }
 
 enum MacHostError: Error, CustomStringConvertible {
@@ -60,7 +61,7 @@ func printUsage() {
     Usage:
       MacHost [--wifi | --host <ip>] [--port 5000] [--fps 60]
               [--width N --height N] [--bitrate 25000000]
-              [--display N] [--no-touch]
+              [--display N] [--hevc] [--no-touch]
 
     --wifi discovers the tablet on the LAN (UDP broadcast) so no IP is needed;
     --host <ip> connects to a specific address (or 127.0.0.1 with adb forward).
@@ -133,6 +134,8 @@ func parseOptions(_ args: [String]) throws -> Options {
             options.bitrate = try readInt(arg)
         case "--display":
             options.displayIndex = try readInt(arg)
+        case "--hevc":
+            options.hevc = true
         case "--remove-display":
             options.removeDisplay = true
         case "--no-touch":
@@ -283,8 +286,18 @@ final class VideoSender {
     }
 }
 
-final class H264AnnexBEncoder {
+// The video codec MacHost encodes. The receiver auto-detects H.264 vs HEVC from
+// the first NAL header, so no negotiation is needed — the host just picks.
+enum VideoCodec {
+    case h264, hevc
+    var cmType: CMVideoCodecType {
+        self == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264
+    }
+}
+
+final class AnnexBEncoder {
     private let sender: VideoSender
+    private let codec: VideoCodec
     private let width: Int32
     private let height: Int32
     private let fps: Int
@@ -293,8 +306,9 @@ final class H264AnnexBEncoder {
     private var sentParameterSets = false
     private var frameCount: Int64 = 0
 
-    init(width: Int, height: Int, fps: Int, bitrate: Int, sender: VideoSender) throws {
+    init(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrate: Int, sender: VideoSender) throws {
         self.sender = sender
+        self.codec = codec
         self.width = Int32(width)
         self.height = Int32(height)
         self.fps = fps
@@ -302,7 +316,7 @@ final class H264AnnexBEncoder {
 
         let callback: VTCompressionOutputCallback = { refcon, _, status, _, sampleBuffer in
             guard status == noErr, let refcon, let sampleBuffer else { return }
-            let encoder = Unmanaged<H264AnnexBEncoder>.fromOpaque(refcon).takeUnretainedValue()
+            let encoder = Unmanaged<AnnexBEncoder>.fromOpaque(refcon).takeUnretainedValue()
             do {
                 try encoder.handleEncodedSample(sampleBuffer)
             } catch {
@@ -314,7 +328,7 @@ final class H264AnnexBEncoder {
             allocator: kCFAllocatorDefault,
             width: self.width,
             height: self.height,
-            codecType: kCMVideoCodecType_H264,
+            codecType: codec.cmType,
             encoderSpecification: nil,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
@@ -331,6 +345,10 @@ final class H264AnnexBEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: fps))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate))
+        if codec == .hevc {
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
+                                 value: kVTProfileLevel_HEVC_Main_AutoLevel)
+        }
 
         let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(session)
         guard prepareStatus == noErr else {
@@ -423,34 +441,43 @@ final class H264AnnexBEncoder {
         }
     }
 
+    // Reads one parameter set (SPS/PPS for H.264; VPS/SPS/PPS for HEVC) from the
+    // format description, dispatching to the codec-specific accessor.
+    private func getParameterSet(_ description: CMFormatDescription, index: Int,
+                                 pointer: inout UnsafePointer<UInt8>?, size: inout Int,
+                                 count: inout Int) -> OSStatus {
+        if codec == .hevc {
+            return CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                description, parameterSetIndex: index,
+                parameterSetPointerOut: &pointer, parameterSetSizeOut: &size,
+                parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil)
+        }
+        return CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            description, parameterSetIndex: index,
+            parameterSetPointerOut: &pointer, parameterSetSizeOut: &size,
+            parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil)
+    }
+
     private func writeParameterSets(_ sampleBuffer: CMSampleBuffer) throws {
         guard let description = CMSampleBufferGetFormatDescription(sampleBuffer) else {
             return
         }
 
         var parameterSetCount = 0
-        var nalUnitHeaderLength: Int32 = 0
-        let countStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-            description,
-            parameterSetIndex: 0,
-            parameterSetPointerOut: nil,
-            parameterSetSizeOut: nil,
-            parameterSetCountOut: &parameterSetCount,
-            nalUnitHeaderLengthOut: &nalUnitHeaderLength
-        )
+        var ignoredPointer: UnsafePointer<UInt8>?
+        var ignoredSize = 0
+        let countStatus = getParameterSet(description, index: 0,
+                                          pointer: &ignoredPointer, size: &ignoredSize,
+                                          count: &parameterSetCount)
         guard countStatus == noErr else { return }
 
         for index in 0..<parameterSetCount {
             var pointer: UnsafePointer<UInt8>?
             var size = 0
-            let status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                description,
-                parameterSetIndex: index,
-                parameterSetPointerOut: &pointer,
-                parameterSetSizeOut: &size,
-                parameterSetCountOut: nil,
-                nalUnitHeaderLengthOut: nil
-            )
+            var ignoredCount = 0
+            let status = getParameterSet(description, index: index,
+                                         pointer: &pointer, size: &size,
+                                         count: &ignoredCount)
             guard status == noErr, let pointer else { continue }
 
             var packet = Data([0x00, 0x00, 0x00, 0x01])
@@ -461,10 +488,10 @@ final class H264AnnexBEncoder {
 }
 
 final class ScreenCaptureHost: NSObject, SCStreamOutput {
-    private let encoder: H264AnnexBEncoder
+    private let encoder: AnnexBEncoder
     private var stream: SCStream?
 
-    init(encoder: H264AnnexBEncoder) {
+    init(encoder: AnnexBEncoder) {
         self.encoder = encoder
     }
 
@@ -661,7 +688,9 @@ struct MacHostMain {
             } else {
                 print("Capture: virtual display (extended desktop)")
             }
-            print("Encode: H.264 VideoToolbox, \(encodeWidth)x\(encodeHeight) @ \(options.fps) FPS")
+            let codec: VideoCodec = options.hevc ? .hevc : .h264
+            print("Encode: \(options.hevc ? "HEVC" : "H.264") VideoToolbox, " +
+                  "\(encodeWidth)x\(encodeHeight) @ \(options.fps) FPS")
 
             var touchBridge: TouchBridge?
             if !options.noTouch {
@@ -685,9 +714,9 @@ struct MacHostMain {
                 }
 
                 let videoSender = try VideoSender(writer: writer, key: pairKey)
-                let encoder = try H264AnnexBEncoder(width: encodeWidth, height: encodeHeight,
-                                                    fps: options.fps, bitrate: options.bitrate,
-                                                    sender: videoSender)
+                let encoder = try AnnexBEncoder(codec: codec, width: encodeWidth, height: encodeHeight,
+                                                fps: options.fps, bitrate: options.bitrate,
+                                                sender: videoSender)
                 let host = ScreenCaptureHost(encoder: encoder)
                 try await host.start(display: selection.display, width: encodeWidth,
                                      height: encodeHeight, fps: options.fps)

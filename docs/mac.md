@@ -2,19 +2,23 @@
 
 The Mac host turns the same Android tablet + receiver app into a true
 **extended display** for a Mac. It shares the Android APK and the
-H.264-Annex-B-over-TCP video protocol with the Windows host:
+Annex-B-over-TCP video protocol with the Windows host:
 
 ```text
 native virtual display (CGVirtualDisplay, 2960x1848@60 HiDPI)
-  → ScreenCaptureKit → VideoToolbox H.264 → TCP :5000 (USB via adb, or Wi-Fi)
+  → ScreenCaptureKit → VideoToolbox H.264/HEVC → TCP :5000 (USB via adb, or Wi-Fi)
   → Android MediaCodec → screen
 ```
+
+Video, a native extended display, tablet-touch control, LAN discovery, and PIN
+pairing with AES-256-GCM encryption all work; desktop audio, real multi-touch/
+pen, UDP, 120 fps and HDR remain Windows-only (see the matrix below).
 
 ## Mac vs Windows — what works where
 
 | Capability | Windows host (v0.8.0) | Mac host |
 |---|---|---|
-| Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264, TCP only |
+| Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264 + HEVC, TCP only |
 | Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848@60 HiDPI (default) |
 | Tablet discovery | ✅ UDP broadcast | ✅ `--wifi` (UDP broadcast), or `--host <ip>` |
 | Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse (stylus rides the mouse path) |
@@ -129,6 +133,7 @@ right edge of your Mac and they appear on the tablet.
 --height N        encoded height                               [0 = native]
 --bitrate N       H.264 bitrate, bits/sec                      [25000000]
 --display N       capture existing SCK display N (mirror)      [off = virtual]
+--hevc            encode HEVC/H.265 instead of H.264 (sharper at high res)
 --wifi            discover the tablet on the LAN (UDP :5002), then TCP
 --no-touch        disable tablet touch → Mac cursor injection
 --remove-display  clear session virtual displays and exit
@@ -191,7 +196,6 @@ Verify the KDF matches the other platforms byte-for-byte:
 
 ## Limitations (honest)
 
-- H.264 only (HEVC needs codec negotiation the Mac phase never grew).
 - Touch is single-pointer mouse (no real multi-touch or pen pressure yet).
 - No desktop-audio channel yet (so nothing to encrypt there); the audio path
   lives only in the Windows host (see [SECURITY.md](../SECURITY.md) and the

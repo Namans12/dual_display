@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.0 — 2026-07-03 (in progress)
+## v0.9.0 — 2026-07-03
 
 Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
 (Apple silicon, M4) against receiver v9 on a Galaxy Tab S9 Ultra.
@@ -107,6 +107,18 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
   host restarting the stream), setting up the virtual display and touch bridge
   once. Verified: killing the tablet app mid-stream → host survives → reconnects
   and resumes when the app reopens.
+
+- **Stage 4c — HEVC (`--hevc`).** The encoder can emit H.265/HEVC
+  (`kCMVideoCodecType_HEVC`, Main profile, VPS/SPS/PPS parameter sets as
+  Annex-B); the receiver auto-detects the codec from the first NAL, so no
+  negotiation. Verified on-device: `--hevc` → tablet spins up
+  `c2.qti.hevc.decoder` and shows "Decoding HEVC"; `--hevc` + `EXTDISPLAY_KEY`
+  → encrypted HEVC decodes (full-desktop frame) with touch still pixel-exact.
+
+The Mac host is no longer "video-only": it now does a native extended display,
+touch-back, LAN discovery, PIN pairing + AES-256-GCM, and HEVC. Remaining
+Windows-only: desktop audio, real multi-touch / pen pressure, UDP transport,
+120 fps mode-switch, HDR.
 
 ## v0.8.0 — 2026-07-02
 

@@ -69,7 +69,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>Extended Display</string>
     <key>CFBundleExecutable</key><string>ExtendedDisplay</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2.0</string>
+    <key>CFBundleShortVersionString</key><string>0.9.0</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict>
 </plist>
