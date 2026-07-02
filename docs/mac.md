@@ -16,7 +16,7 @@ native virtual display (CGVirtualDisplay, 2960x1848@60 HiDPI)
 |---|---|---|
 | Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264, TCP only |
 | Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848@60 HiDPI (default) |
-| Tablet discovery | ✅ UDP broadcast | ➖ manual `--host <ip>` (or USB adb forward) |
+| Tablet discovery | ✅ UDP broadcast | ✅ `--wifi` (UDP broadcast), or `--host <ip>` |
 | Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse (stylus rides the mouse path) |
 | Desktop audio → tablet | ✅ | ❌ |
 | PIN pairing + AES-256-GCM encryption | ✅ all channels | ❌ (stream is plaintext) |
@@ -83,16 +83,20 @@ swift build -c release
 
 ```bash
 adb forward tcp:5000 tcp:5000
+adb forward tcp:5001 tcp:5001              # touch uplink (tablet → Mac input)
 adb shell am start -n com.heysnap.extdisplay/.MainActivity
 .build/release/MacHost --host 127.0.0.1 --port 5000
 ```
 
-**Wi-Fi** (no adb needed): open the app on the tablet — its status line shows
-the tablet's IP (`Ready • Wi-Fi 192.168.x.x`), then:
+**Wi-Fi** (no adb needed): open the app on the tablet, then let MacHost find it
+on the LAN:
 
 ```bash
-.build/release/MacHost --host 192.168.x.x --port 5000
+.build/release/MacHost --wifi
 ```
+
+Or connect to a specific IP (the tablet's status line shows it —
+`Ready • Wi-Fi 192.168.x.x`): `MacHost --host 192.168.x.x`.
 
 Both machines must be on the same network; guest/AP-isolated Wi-Fi blocks this.
 
@@ -125,7 +129,10 @@ right edge of your Mac and they appear on the tablet.
 --height N        encoded height                               [0 = native]
 --bitrate N       H.264 bitrate, bits/sec                      [25000000]
 --display N       capture existing SCK display N (mirror)      [off = virtual]
+--wifi            discover the tablet on the LAN (UDP :5002), then TCP
+--no-touch        disable tablet touch → Mac cursor injection
 --remove-display  clear session virtual displays and exit
+--selftest        run protocol self-tests and exit
 ```
 
 `--width/--height` default to the captured display's native pixel size (the

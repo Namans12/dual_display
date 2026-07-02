@@ -17,6 +17,8 @@ struct Options {
     var removeDisplay = false
     var noTouch = false
     var selfTest = false
+    var wifi = false
+    var hostExplicit = false  // --host given → skip discovery
 }
 
 enum MacHostError: Error, CustomStringConvertible {
@@ -53,9 +55,12 @@ func printUsage() {
     MacHost — extended display for an Android tablet
 
     Usage:
-      MacHost --host <ip> [--port 5000] [--fps 60]
+      MacHost [--wifi | --host <ip>] [--port 5000] [--fps 60]
               [--width N --height N] [--bitrate 25000000]
               [--display N] [--no-touch]
+
+    --wifi discovers the tablet on the LAN (UDP broadcast) so no IP is needed;
+    --host <ip> connects to a specific address (or 127.0.0.1 with adb forward).
 
     By default MacHost creates a native virtual display (2960x1848@60, the
     tablet's panel) and streams THAT — a true extended display. Pass
@@ -111,6 +116,9 @@ func parseOptions(_ args: [String]) throws -> Options {
             exit(0)
         case "--host":
             options.host = try requireValue(arg)
+            options.hostExplicit = true
+        case "--wifi":
+            options.wifi = true
         case "--port":
             options.port = try readInt(arg)
         case "--fps":
@@ -460,6 +468,7 @@ func parkUntilSignal() async {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler {
+                g_stop.set()
                 if once.first() { continuation.resume() }
             }
             source.activate()
@@ -543,7 +552,7 @@ struct MacHostMain {
     static func main() async {
         setvbuf(stdout, nil, _IOLBF, 0)  // line-buffered: Finder launches log to a file
         do {
-            let options = try parseOptions(CommandLine.arguments)
+            var options = try parseOptions(CommandLine.arguments)
 
             if options.selfTest {
                 exit(runSelfTests())
@@ -555,6 +564,22 @@ struct MacHostMain {
                       "unsaved display arrangement changes.")
                 VirtualDisplay.removeAllSessionDisplays()
                 exit(0)
+            }
+
+            // --wifi: find the tablet on the LAN (unless --host pinned an IP).
+            if options.wifi && !options.hostExplicit {
+                var announced = false
+                while !g_stop.isSet {
+                    if let ip = Discovery.findTablet(timeoutSeconds: 15) {
+                        options.host = ip
+                        break
+                    }
+                    if !announced {
+                        print("No tablet found yet; retrying. (Same Wi-Fi network? App open?)")
+                        announced = true
+                    }
+                }
+                if g_stop.isSet { exit(0) }
             }
 
             print("Connecting to \(options.host):\(options.port)")

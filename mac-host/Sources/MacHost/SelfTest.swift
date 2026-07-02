@@ -55,8 +55,16 @@ func runSelfTests() -> Int32 {
     overPressure[11] = 0xD0  // 2000
     expect(parseTouchPacket(overPressure)?.pressure == 1024, "pressure clamped to 1024")
 
+    // Discovery reply parsing.
+    expect(Discovery.deviceName(fromReply: "EXTDISP!v1|Samsung SM-X910|5000") == "Samsung SM-X910",
+           "discovery reply name")
+    expect(Discovery.deviceName(fromReply: "EXTDISP!v1|NoPort") == "NoPort",
+           "discovery reply name without port")
+    expect(Discovery.deviceName(fromReply: "EXTDISP?v1") == nil, "query is not a reply")
+    expect(Discovery.deviceName(fromReply: "garbage") == nil, "garbage rejected")
+
     if failures == 0 {
-        print("selftest: OK (touch v2 parse)")
+        print("selftest: OK (touch v2 parse, discovery reply parse)")
         return 0
     }
     print("selftest: \(failures) failure(s)")

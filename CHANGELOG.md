@@ -75,6 +75,13 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
   - docs/protocol.md touch section corrected to protocol v2 (was documented as
     the retired 24-byte v1).
 
+- **Stage 4a — `--wifi` LAN discovery (parity with Windows).** `MacHost --wifi`
+  broadcasts `EXTDISP?v1` on UDP 5002 to every up/non-loopback interface's
+  subnet-directed address (`ip | ~mask`, plus 255.255.255.255) and connects to
+  the first tablet that answers `EXTDISP!v1|<name>|<port>` — no IP typing.
+  Verified on-device: found `samsung SM-X910 at 192.168.1.19` and streamed
+  (video + touch) over Wi-Fi. `--selftest` gained a reply-parser check.
+
 ## v0.8.0 — 2026-07-02
 
 Improvements (Wi-Fi robustness + usability + security + desktop audio).
