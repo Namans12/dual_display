@@ -4,6 +4,22 @@
 
 Improvements (Wi-Fi robustness + usability + security + desktop audio).
 
+- **Pairing is now one-time.** The tablet stores the derived key after a
+  successful pair and re-applies it on every launch; the PC GUI persists the
+  pairing code (`%LOCALAPPDATA%\ExtendedDisplay\pairing.code`) and reuses it, with
+  a "new code" link to rotate. If the PC later streams unencrypted, the tablet
+  auto-detects (TCP `EXVE` marker / UDP first-packet latch) and unseals its touch
+  channel for that session — no silent breakage on mismatch. Verified on-device:
+  pair once → app restart auto-pairs ("Paired from saved key") with video, touch
+  and audio working untyped; plaintext session with a saved key decodes with zero
+  touch auth failures. Details + trade-offs in [SECURITY.md](SECURITY.md).
+- **Fixed: encrypted-TCP sessions now survive the tablet app restarting.** When
+  the peer dropped, the sender's pipe loop exited but then waited on ffmpeg
+  forever — and ffmpeg was blocked writing the undrained pipe (deadlock; the
+  stream froze until the sender was killed). The sender now kills ffmpeg on peer
+  disconnect and reconnects; a disconnect keeps its uptime so the proven encoder
+  isn't blamed.
+
 - **Desktop audio (PC → tablet).** New opt-in "Desktop audio" checkbox (CLI:
   `--audio`) streams whatever the PC is playing to the tablet's speakers. The
   sender captures the default render endpoint via **WASAPI loopback** (no extra

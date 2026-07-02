@@ -38,6 +38,7 @@ namespace ExtendedDisplay
         NumericUpDown numDelay;
         Button btnStart, btnStop;
         Label lblStatus, lblCode;
+        LinkLabel lnkNewCode;
         ToolTip tip;
         string pairCode = "";
         Process sender;
@@ -109,14 +110,17 @@ namespace ExtendedDisplay
                 if (!chkAudio.Checked) chkMute.Checked = false;
             };
             chkEncrypt = new CheckBox { Text = "Encrypt", Location = new Point(12, 184), AutoSize = true };
-            var iEnc = Info(184, "Require a pairing code (shown below) on the tablet. Encrypts video, touch and audio with AES-256 - use it on untrusted Wi-Fi.", chkEncrypt);
+            var iEnc = Info(184, "Require a pairing code (shown below) on the tablet. Encrypts video, touch and audio with AES-256 - use it on untrusted Wi-Fi. The code is remembered on both sides, so you type it on the tablet only once; click 'new code' to rotate it.", chkEncrypt);
             chkEncrypt.CheckedChanged += OnEncryptToggled;
             grpOpt.Controls.AddRange(new Control[] {
                 chkTouch, iTouch, chkHevc, iHevc, chkHdr, iHdr, chkAudio, iAudio,
                 chkMute, iMute, lblDelay, numDelay, iDelay, chkEncrypt, iEnc });
 
             // ── Pairing code + status + buttons ───────────────────────────
-            lblCode = new Label { Text = "", Location = new Point(14, 442), Size = new Size(374, 22), ForeColor = Color.MediumBlue, Font = new Font("Consolas", 11f, FontStyle.Bold) };
+            lblCode = new Label { Text = "", Location = new Point(14, 442), Size = new Size(290, 22), ForeColor = Color.MediumBlue, Font = new Font("Consolas", 11f, FontStyle.Bold) };
+            lnkNewCode = new LinkLabel { Text = "new code", Location = new Point(310, 444), AutoSize = true, Visible = false };
+            lnkNewCode.Click += OnNewCode;
+            tip.SetToolTip(lnkNewCode, Wrap("Generate a fresh pairing code (rotates the key). Enter the new code on the tablet on the next Start."));
             lblStatus = new Label { Text = "Ready.", Location = new Point(14, 466), Size = new Size(374, 20), ForeColor = Color.DimGray, AutoEllipsis = true };
             btnStart = new Button { Text = "Start Streaming", Location = new Point(12, 494), Size = new Size(182, 38), BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
             btnStart.FlatAppearance.BorderSize = 0;
@@ -124,7 +128,7 @@ namespace ExtendedDisplay
             btnStart.Click += OnStart;
             btnStop.Click += OnStop;
 
-            Controls.AddRange(new Control[] { grpConn, grpVid, grpOpt, lblCode, lblStatus, btnStart, btnStop });
+            Controls.AddRange(new Control[] { grpConn, grpVid, grpOpt, lblCode, lnkNewCode, lblStatus, btnStart, btnStop });
 
             FormClosing += (s, e) => { StopSender(); DisableVdd(); };
 
@@ -260,16 +264,57 @@ namespace ExtendedDisplay
             worker.RunWorkerAsync();
         }
 
-        // Toggling encryption mints a fresh pairing code and shows it. The user
-        // types it into the tablet once; both derive the same key.
+        // Ticking Encrypt shows the pairing code. The code persists across launches
+        // (and the tablet stores the derived key), so it is typed on the tablet
+        // ONCE — "new code" rotates it when you want to re-key.
         void OnEncryptToggled(object s, EventArgs e)
         {
             if (chkEncrypt.Checked)
             {
-                pairCode = GenerateCode();
+                if (pairCode.Length == 0) pairCode = LoadCode();
+                if (pairCode.Length == 0) { pairCode = GenerateCode(); SaveCode(pairCode); }
                 lblCode.Text = "Pairing code:   " + pairCode;
+                lnkNewCode.Visible = true;
             }
-            else { pairCode = ""; lblCode.Text = ""; }
+            else { lblCode.Text = ""; lnkNewCode.Visible = false; }
+        }
+
+        void OnNewCode(object s, EventArgs e)
+        {
+            pairCode = GenerateCode();
+            SaveCode(pairCode);
+            lblCode.Text = "Pairing code:   " + pairCode;
+            SetStatus("New code - enter it on the tablet on the next Start.", Color.DimGray);
+        }
+
+        // The code is remembered so pairing is one-time. Stored per-user under
+        // LOCALAPPDATA (same place as the encoder cache); rotate via "new code".
+        static string CodePath()
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ExtendedDisplay");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "pairing.code");
+        }
+
+        static string LoadCode()
+        {
+            try
+            {
+                if (File.Exists(CodePath()))
+                {
+                    string code = File.ReadAllText(CodePath()).Trim();
+                    if (code.Length == 8) return code;
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        static void SaveCode(string code)
+        {
+            try { File.WriteAllText(CodePath(), code); } catch { }
         }
 
         // 8-char code from an unambiguous alphabet (no I/O/0/1), crypto-random.
@@ -286,7 +331,11 @@ namespace ExtendedDisplay
         void OnStart(object src, EventArgs e)
         {
             if (!File.Exists(exePath)) { SetStatus("Sender exe not found.", Color.Firebrick); return; }
-            if (chkEncrypt.Checked && pairCode.Length == 0) pairCode = GenerateCode();
+            if (chkEncrypt.Checked && pairCode.Length == 0)
+            {
+                pairCode = GenerateCode(); SaveCode(pairCode);
+                lblCode.Text = "Pairing code:   " + pairCode;
+            }
 
             SetStatus("Enabling virtual display...", Color.DimGray);
             btnStart.Enabled = false;

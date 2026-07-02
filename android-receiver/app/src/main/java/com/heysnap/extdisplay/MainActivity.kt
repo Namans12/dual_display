@@ -130,6 +130,23 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         audioReceiver.start()
         discovery.start(applicationContext)
 
+        // Remember pairing: the derived key from a previously entered code is stored
+        // (app-private prefs) so the code is typed once, ever. Applied before any
+        // connection arrives; if the PC streams unencrypted instead, the receiver
+        // detects it (EXVE marker on TCP / first-packet latch on UDP) and disables
+        // touch sealing for that session, so nothing breaks on a mismatch.
+        getSharedPreferences("pairing", MODE_PRIVATE).getString("key_b64", null)?.let {
+            try {
+                val key = android.util.Base64.decode(it, android.util.Base64.NO_WRAP)
+                if (key.size == 32) {
+                    pairingKey = key
+                    touchUplink.setKey(key)
+                    audioReceiver.setKey(key)
+                    Log.i(TAG, "Paired from saved key (${Crypto.hex(key).take(8)}…)")
+                }
+            } catch (_: Exception) {}
+        }
+
         statusView = TextView(this).apply {
             val ip = localWifiIp()
             text = if (ip != null) "Ready  •  Wi-Fi $ip  •  USB ready" else "Waiting on TCP $LISTEN_PORT"
@@ -143,7 +160,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         // once. Leave it be for an open/trusted LAN. A boxed, monospaced, letter-
         // spaced field reads like separate blocks and shows every character clearly.
         val pairTitle = TextView(this).apply {
-            text = "Pairing code (from PC)"
+            text = if (pairingKey != null) "Paired earlier - type a new code to re-pair"
+                   else "Pairing code (from PC)"
             setTextColor(0xFFDDDDDD.toInt())
             textSize = 13f
             gravity = Gravity.CENTER
@@ -241,6 +259,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             touchUplink.setKey(key)     // touch encrypts per-packet (reads key live)
             audioReceiver.setKey(key)   // audio decrypts per-frame (reads key live)
             receiver?.setKey(key)       // video decrypts per-frame (drained until now)
+            // Remember the derived key so the code never has to be typed again
+            // (typing a new code later simply overwrites it).
+            getSharedPreferences("pairing", MODE_PRIVATE).edit()
+                .putString("key_b64", android.util.Base64.encodeToString(key, android.util.Base64.NO_WRAP))
+                .apply()
             Log.i(TAG, "Paired: encryption enabled (key ${Crypto.hex(key).take(8)}…)")
             statusView.text = "Paired — link encrypted"
             // Show the completed code (green), then tuck the panel away — deferred so
@@ -382,7 +405,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         receiver = H264TcpReceiver(
             surface = holder.surface,
             onStatus = { status -> runOnUiThread { statusView.text = status } },
-            onVideoSize = { w, h -> runOnUiThread { applyVideoSize(w, h) } }
+            onVideoSize = { w, h -> runOnUiThread { applyVideoSize(w, h) } },
+            onEncrypted = { enc -> touchUplink.setKey(if (enc) pairingKey else null) }
         ).also { it.setKey(pairingKey); it.start() }
     }
 
@@ -473,7 +497,11 @@ private class UdpReassembler(private val onNal: (ByteArray) -> Unit) {
 private class H264TcpReceiver(
     private val surface: Surface,
     private val onStatus: (String) -> Unit,
-    private val onVideoSize: (Int, Int) -> Unit
+    private val onVideoSize: (Int, Int) -> Unit,
+    // Reports whether the incoming video stream is encrypted (TCP: EXVE marker;
+    // UDP: first-packet latch) so the activity can match the touch channel to the
+    // session — a saved key against an unencrypted sender must not seal touches.
+    private val onEncrypted: (Boolean) -> Unit = {}
 ) {
     private val running = AtomicBoolean(false)
     private var server: ServerSocket? = null
@@ -542,6 +570,7 @@ private class H264TcpReceiver(
                             ((magic[2].toInt() and 0xff) shl 8) or
                             (magic[3].toInt() and 0xff)
                     if (m == ENC_VIDEO_MAGIC) {
+                        onEncrypted(true)
                         // Length-prefixed encrypted frames [4B BE len][nonce+ct+tag].
                         // videoSealer is read PER-FRAME: before pairing it's null so we
                         // DRAIN frames (no garbage decode / no picture-of-noise); once
@@ -563,6 +592,7 @@ private class H264TcpReceiver(
                             nalQueue.put(nal)
                         }
                     } else {
+                        onEncrypted(false)  // plaintext session (e.g. saved key, Encrypt off)
                         pin.unread(magic, 0, got)  // those bytes start the Annex-B stream
                         val splitter = AnnexBNalSplitter(pin)
                         while (running.get()) {
@@ -590,13 +620,26 @@ private class H264TcpReceiver(
                     bind(InetSocketAddress(LISTEN_PORT))
                 }
                 udpSocket = sock
+                // Session mode latch: the first reassembled blob decides. A saved key
+                // against an UNENCRYPTED sender must not blank the video (open() would
+                // reject every plaintext NAL), so on first auth-failure the session
+                // latches plaintext and passes NALs through; on first success it
+                // latches encrypted and stays strict (drop on auth failure = tamper).
+                var udpMode = 0  // 0 = undecided, 1 = encrypted, 2 = plaintext
                 val reasm = UdpReassembler { blob ->
                     if (!running.get()) return@UdpReassembler
-                    // When paired, each reassembled blob is an AES-GCM frame; decrypt
-                    // to the NAL (drop on auth failure = wrong code / tampering).
                     val s = videoSealer
-                    val nal = if (s != null) s.open(blob, 0, blob.size) else blob
-                    if (nal != null) nalQueue.offer(nal)
+                    if (s == null) { nalQueue.offer(blob); return@UdpReassembler }
+                    when (udpMode) {
+                        1 -> s.open(blob, 0, blob.size)?.let { nalQueue.offer(it) }
+                        2 -> nalQueue.offer(blob)
+                        else -> {
+                            val pt = s.open(blob, 0, blob.size)
+                            udpMode = if (pt != null) 1 else 2
+                            onEncrypted(udpMode == 1)
+                            nalQueue.offer(pt ?: blob)
+                        }
+                    }
                 }
                 val buf = ByteArray(2048)
                 var announced = false

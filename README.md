@@ -92,6 +92,6 @@ See [docs/build.md](docs/build.md) for building each component and the full CLI,
 
 ## Roadmap (not yet built)
 
-- Wireless security: QR pairing + encrypted LAN stream (currently open/plaintext on a trusted LAN).
-- UDP loss resilience: FEC + on-demand keyframes + RTT-adaptive bitrate.
-- Native macOS virtual display (CGVirtualDisplay) and Mac HDR.
+- QR-scan pairing (today you type the 8-char code; the encryption itself shipped in v0.8.0 — see [SECURITY.md](SECURITY.md)).
+- UDP loss resilience: FEC + on-demand keyframes + RTT-adaptive bitrate (needs a receiver→sender feedback channel; deliberately deferred — see [Fixes.md](Fixes.md)).
+- Mac: native virtual display (CGVirtualDisplay), touch-back, HDR — see [docs/mac.md](docs/mac.md).

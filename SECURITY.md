@@ -84,9 +84,24 @@ can't authenticate it, it reports "wrong pairing code" and disconnects.
      paired (correct code) → continuous decrypted playback with a stable connection
      (a wrong key fails `open()` on the first frame and drops the link, same as the
      other channels).
-4. **Polish** (todo) — "wrong code" UX in the GUI, remember pairing (store the
-   derived key on the tablet so the code is entered once), optional toggle to run
-   open on a trusted LAN.
+4. **Polish** — **remember pairing ✅ done** (v0.8.0): the tablet stores the
+   *derived key* (app-private preferences) after a successful pair and re-applies
+   it on launch; the PC GUI persists the pairing code per-user under
+   `%LOCALAPPDATA%\ExtendedDisplay\pairing.code` and reuses it across launches. So
+   the code is typed on the tablet **once, ever** — the GUI's "new code" link
+   rotates it (re-enter on the tablet after rotating).
+   - **Mismatch auto-detect:** if the PC later streams *unencrypted* while the
+     tablet holds a saved key, the tablet detects it (TCP: no `EXVE` marker;
+     UDP: first-packet latch) and disables its touch sealing for that session, so
+     nothing silently breaks. Trade-off (deliberate): a paired tablet will still
+     *display* a plaintext stream — display spoofing on the LAN remains possible
+     when the sender isn't enforcing encryption. The **input** direction stays
+     strict: a paired sender never accepts plaintext touch.
+   - Storage caveat: the key sits in app-private storage (sandboxed, not
+     hardware-backed). Fine for this threat model (LAN attacker, not a
+     compromised device); Android Keystore wrapping would be the upgrade.
+   Remaining polish (todo): richer "wrong code" UX in the GUI, optional
+   open-LAN toggle.
 
 Opt-in: streams stay open (today's behaviour) unless a pairing code is set, so a
 trusted home LAN needn't change. Encryption engages automatically once paired.

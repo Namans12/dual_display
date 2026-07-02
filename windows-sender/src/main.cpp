@@ -2029,11 +2029,18 @@ ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host
         if (base > 0) { buf.erase(buf.begin(), buf.begin() + base); base = 0; }
     }
 
-    WaitForSingleObject(pi.hProcess, g_stop.load() ? 0 : INFINITE);
-    if (g_stop.load()) TerminateProcess(pi.hProcess, 1);
+    // ffmpeg only exits on its own when ITS pipe breaks. If the tablet dropped the
+    // TCP connection (alive == false, e.g. the app restarted), ffmpeg is still
+    // running and blocked on the now-undrained pipe — waiting INFINITE here would
+    // deadlock the whole session. Kill it so the supervisor can reconnect.
+    WaitForSingleObject(pi.hProcess, (g_stop.load() || !alive) ? 0 : INFINITE);
+    TerminateProcess(pi.hProcess, 1);  // no-op if it already exited
     ULONGLONG uptime = GetTickCount64() - started;
     DWORD exitCode = 0;
-    if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0 && exitCode != STILL_ACTIVE) {
+    // A peer disconnect (!alive) is a clean stream end, not an encoder failure —
+    // keep the uptime so the supervisor reconnects instead of walking the ladder.
+    if (alive && GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0 &&
+        exitCode != STILL_ACTIVE) {
         uptime = 0;
     }
     g_child.exchange(nullptr);
