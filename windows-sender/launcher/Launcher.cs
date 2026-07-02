@@ -38,6 +38,7 @@ namespace ExtendedDisplay
         NumericUpDown numDelay;
         Button btnStart, btnStop;
         Label lblStatus, lblCode;
+        ToolTip tip;
         string pairCode = "";
         Process sender;
         string exePath;
@@ -50,58 +51,76 @@ namespace ExtendedDisplay
             exePath = ResolveSenderPath();
 
             Text = "Extended Display";
-            ClientSize = new Size(380, 548);
+            ClientSize = new Size(400, 544);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9.5f);
+            BackColor = Color.White;
+
+            tip = new ToolTip { AutoPopDelay = 30000, InitialDelay = 350, ReshowDelay = 100, ShowAlways = true };
 
             // ── Connection ────────────────────────────────────────────────
-            var grpConn = new GroupBox { Text = "Connection", Location = new Point(12, 10), Size = new Size(356, 96) };
-            rbUsb = new RadioButton { Text = "USB  (auto-detect via adb)", Location = new Point(12, 22), AutoSize = true, Checked = true };
-            rbWifi = new RadioButton { Text = "Wi-Fi", Location = new Point(12, 46), AutoSize = true };
-            // Manual tablet IP for networks that block the discovery broadcast
-            // (AP isolation, guest networks). Empty = auto-discover on the LAN.
-            var lblIp = new Label { Text = "IP (optional):", Location = new Point(78, 48), AutoSize = true };
-            txtIp = new TextBox { Location = new Point(162, 45), Width = 120, Enabled = false, Text = "" };
-            chkUdp = new CheckBox { Text = "Low-latency UDP  (Wi-Fi only)", Location = new Point(30, 70), AutoSize = true, Enabled = false };
+            var grpConn = new GroupBox { Text = "Connection", Location = new Point(12, 10), Size = new Size(376, 96) };
+            rbUsb = new RadioButton { Text = "USB  (auto-detect)", Location = new Point(12, 24), AutoSize = true, Checked = true };
+            rbWifi = new RadioButton { Text = "Wi-Fi", Location = new Point(12, 50), AutoSize = true };
+            var lblIp = new Label { Text = "IP (optional):", Location = new Point(92, 52), AutoSize = true };
+            txtIp = new TextBox { Location = new Point(180, 49), Width = 118, Enabled = false, Text = "" };
+            tip.SetToolTip(txtIp, Wrap("Optional. Enter the tablet's IP if auto-discovery fails (guest / AP-isolated networks). Leave blank to auto-find it on the LAN."));
+            chkUdp = new CheckBox { Text = "Low-latency UDP", Location = new Point(30, 72), AutoSize = true, Enabled = false };
+            var iUdp = Info(72, "Send video over UDP for lower latency on Wi-Fi. Helps on lossy / high-latency links; on a good 5 GHz link, plain TCP is usually smoother.", chkUdp);
             rbWifi.CheckedChanged += (s, e) => { chkUdp.Enabled = rbWifi.Checked; txtIp.Enabled = rbWifi.Checked; };
-            grpConn.Controls.AddRange(new Control[] { rbUsb, rbWifi, lblIp, txtIp, chkUdp });
+            grpConn.Controls.AddRange(new Control[] { rbUsb, rbWifi, lblIp, txtIp, chkUdp, iUdp });
 
             // ── Video ─────────────────────────────────────────────────────
-            var grpVid = new GroupBox { Text = "Video", Location = new Point(12, 114), Size = new Size(356, 100) };
-            var lblFps = new Label { Text = "FPS:", Location = new Point(12, 26), AutoSize = true };
-            cmbFps = new ComboBox { Location = new Point(70, 23), Width = 70, DropDownStyle = ComboBoxStyle.DropDownList };
+            var grpVid = new GroupBox { Text = "Video", Location = new Point(12, 114), Size = new Size(376, 100) };
+            var lblFps = new Label { Text = "FPS:", Location = new Point(12, 28), AutoSize = true };
+            cmbFps = new ComboBox { Location = new Point(70, 25), Width = 70, DropDownStyle = ComboBoxStyle.DropDownList };
             cmbFps.Items.AddRange(new object[] { "60", "120" }); cmbFps.SelectedIndex = 0;
-            var lblEnc = new Label { Text = "Encoder:", Location = new Point(160, 26), AutoSize = true };
-            cmbEnc = new ComboBox { Location = new Point(225, 23), Width = 118, DropDownStyle = ComboBoxStyle.DropDownList };
+            var iFps = Info(28, "120 fps drops the virtual display to 1920x1200 (the tablet upscales) so the pipeline can sustain 120 Hz. 60 fps runs at native 2960x1848.", cmbFps);
+            var lblEnc = new Label { Text = "Encoder:", Location = new Point(158, 28), AutoSize = true };
+            cmbEnc = new ComboBox { Location = new Point(224, 25), Width = 96, DropDownStyle = ComboBoxStyle.DropDownList };
             cmbEnc.Items.AddRange(new object[] { "Auto", "nvenc", "qsv", "mf", "amf", "x264" }); cmbEnc.SelectedIndex = 0;
-            var lblBit = new Label { Text = "Bitrate (Kbps):", Location = new Point(12, 62), AutoSize = true };
-            txtBit = new TextBox { Text = "25000", Location = new Point(115, 59), Width = 90 };
-            grpVid.Controls.AddRange(new Control[] { lblFps, cmbFps, lblEnc, cmbEnc, lblBit, txtBit });
+            tip.SetToolTip(cmbEnc, Wrap("Leave on Auto - it picks the best working GPU encoder (NVENC, QSV, MF, AMF, x264 in order). Pin one only for troubleshooting."));
+            var lblBit = new Label { Text = "Bitrate (Kbps):", Location = new Point(12, 64), AutoSize = true };
+            txtBit = new TextBox { Text = "25000", Location = new Point(115, 61), Width = 90 };
+            tip.SetToolTip(txtBit, Wrap("Video bitrate in Kbps. Higher = crisper text, more bandwidth. 25000 is a good default; try 40000 for very sharp text."));
+            grpVid.Controls.AddRange(new Control[] { lblFps, cmbFps, iFps, lblEnc, cmbEnc, lblBit, txtBit });
 
             // ── Options ───────────────────────────────────────────────────
-            var grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(356, 208) };
-            chkTouch = new CheckBox { Text = "Touch input  (tablet controls PC)", Location = new Point(12, 22), AutoSize = true, Checked = true };
-            chkHevc = new CheckBox { Text = "HEVC / H.265  (better at high FPS)", Location = new Point(12, 48), AutoSize = true };
-            chkHdr = new CheckBox { Text = "HDR  (experimental - HDR video only; desktop looks washed)", Location = new Point(12, 74), AutoSize = true };
-            chkAudio = new CheckBox { Text = "Desktop audio  (PC sound plays on the tablet)", Location = new Point(12, 100), AutoSize = true };
-            chkMute = new CheckBox { Text = "› Mute PC speakers  (sound only on the tablet)", Location = new Point(30, 126), AutoSize = true, Enabled = false };
-            var lblDelay = new Label { Text = "› A/V sync delay (ms):", Location = new Point(30, 155), AutoSize = true, Enabled = false };
-            numDelay = new NumericUpDown { Location = new Point(178, 152), Width = 62, Minimum = 20, Maximum = 500, Value = 40, Increment = 5, Enabled = false };
+            // Short labels; the full description is on the ⓘ (and on hover of the row).
+            var grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(376, 214) };
+            chkTouch = new CheckBox { Text = "Touch input", Location = new Point(12, 24), AutoSize = true, Checked = true };
+            var iTouch = Info(24, "Tablet touches control the PC - tap = click, drag = move / scroll, long-press = right-click. S Pen pressure & hover work too.", chkTouch);
+            chkHevc = new CheckBox { Text = "HEVC / H.265", Location = new Point(12, 50), AutoSize = true };
+            var iHevc = Info(50, "H.265 encoding - sharper at high resolution / FPS for the same bitrate. Needs tablet HEVC support (the S9 Ultra has it).", chkHevc);
+            chkHdr = new CheckBox { Text = "HDR", Location = new Point(12, 76), AutoSize = true };
+            var iHdr = Info(76, "Experimental - for HDR video content only. The normal SDR desktop looks washed out, so leave this OFF for general use.", chkHdr);
+            chkAudio = new CheckBox { Text = "Desktop audio", Location = new Point(12, 102), AutoSize = true };
+            var iAudio = Info(102, "Play the PC's sound on the tablet over the same link (no extra driver needed).", chkAudio);
+            chkMute = new CheckBox { Text = "› Mute PC speakers", Location = new Point(30, 128), AutoSize = true, Enabled = false };
+            var iMute = Info(128, "Sound plays only on the tablet; the PC's own speakers stay silent while streaming (restored when you Stop).", chkMute);
+            var lblDelay = new Label { Text = "› A/V sync delay (ms):", Location = new Point(30, 157), AutoSize = true, Enabled = false };
+            numDelay = new NumericUpDown { Location = new Point(180, 154), Width = 62, Minimum = 20, Maximum = 500, Value = 40, Increment = 5, Enabled = false };
+            var iDelay = Info(157, "Audio delay for lip-sync (ms). Higher = audio plays later; lower it if audio lags the video. ~40 matches the tablet's own video; ~20 for watching the laptop with the tablet as a speaker.", numDelay);
             chkAudio.CheckedChanged += (s, e) => {
-                chkMute.Enabled = chkAudio.Checked; numDelay.Enabled = chkAudio.Checked; lblDelay.Enabled = chkAudio.Checked;
+                chkMute.Enabled = chkAudio.Checked; numDelay.Enabled = chkAudio.Checked;
+                lblDelay.Enabled = chkAudio.Checked; iMute.Enabled = iDelay.Enabled = chkAudio.Checked;
                 if (!chkAudio.Checked) chkMute.Checked = false;
             };
-            chkEncrypt = new CheckBox { Text = "Encrypt  (require pairing code on the tablet)", Location = new Point(12, 180), AutoSize = true };
+            chkEncrypt = new CheckBox { Text = "Encrypt", Location = new Point(12, 184), AutoSize = true };
+            var iEnc = Info(184, "Require a pairing code (shown below) on the tablet. Encrypts video, touch and audio with AES-256 - use it on untrusted Wi-Fi.", chkEncrypt);
             chkEncrypt.CheckedChanged += OnEncryptToggled;
-            grpOpt.Controls.AddRange(new Control[] { chkTouch, chkHevc, chkHdr, chkAudio, chkMute, lblDelay, numDelay, chkEncrypt });
+            grpOpt.Controls.AddRange(new Control[] {
+                chkTouch, iTouch, chkHevc, iHevc, chkHdr, iHdr, chkAudio, iAudio,
+                chkMute, iMute, lblDelay, numDelay, iDelay, chkEncrypt, iEnc });
 
             // ── Pairing code + status + buttons ───────────────────────────
-            lblCode = new Label { Text = "", Location = new Point(14, 438), Size = new Size(356, 22), ForeColor = Color.MediumBlue, Font = new Font("Consolas", 11f, FontStyle.Bold) };
-            lblStatus = new Label { Text = "Ready.", Location = new Point(14, 462), Size = new Size(356, 20), ForeColor = Color.DimGray };
-            btnStart = new Button { Text = "Start Streaming", Location = new Point(12, 486), Size = new Size(170, 36), BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-            btnStop = new Button { Text = "Stop", Location = new Point(198, 486), Size = new Size(170, 36), Enabled = false };
+            lblCode = new Label { Text = "", Location = new Point(14, 442), Size = new Size(374, 22), ForeColor = Color.MediumBlue, Font = new Font("Consolas", 11f, FontStyle.Bold) };
+            lblStatus = new Label { Text = "Ready.", Location = new Point(14, 466), Size = new Size(374, 20), ForeColor = Color.DimGray };
+            btnStart = new Button { Text = "Start Streaming", Location = new Point(12, 494), Size = new Size(182, 38), BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            btnStart.FlatAppearance.BorderSize = 0;
+            btnStop = new Button { Text = "Stop", Location = new Point(206, 494), Size = new Size(182, 38), Enabled = false };
             btnStart.Click += OnStart;
             btnStop.Click += OnStop;
 
@@ -111,6 +130,50 @@ namespace ExtendedDisplay
 
             if (!File.Exists(exePath))
                 SetStatus("WARNING: sender not found at " + exePath, Color.Firebrick);
+        }
+
+        // WinForms tooltips don't word-wrap on their own — long descriptions render
+        // as one endless line. Break at word boundaries every ~52 chars instead.
+        static string Wrap(string text)
+        {
+            const int width = 52;
+            var sb = new System.Text.StringBuilder();
+            int lineLen = 0;
+            foreach (string word in text.Split(' '))
+            {
+                if (lineLen > 0 && lineLen + 1 + word.Length > width)
+                {
+                    sb.Append("\r\n");
+                    lineLen = 0;
+                }
+                else if (lineLen > 0)
+                {
+                    sb.Append(' ');
+                    lineLen++;
+                }
+                sb.Append(word);
+                lineLen += word.Length;
+            }
+            return sb.ToString();
+        }
+
+        // A small blue ⓘ marker at the right edge of a row. The full description is a
+        // tooltip on the marker and on any related controls (so hovering the row works).
+        Label Info(int y, string text, params Control[] related)
+        {
+            var l = new Label
+            {
+                Text = "ⓘ",   // circled 'i' info glyph
+                Location = new Point(350, y),
+                AutoSize = true,
+                ForeColor = Color.FromArgb(0, 120, 212),
+                Cursor = Cursors.Hand,
+                Font = new Font("Segoe UI", 10.5f)
+            };
+            string wrapped = Wrap(text);
+            tip.SetToolTip(l, wrapped);
+            foreach (var c in related) tip.SetToolTip(c, wrapped);
+            return l;
         }
 
         string ResolveSenderPath()
@@ -343,7 +406,7 @@ namespace ExtendedDisplay
             btnStop.Enabled = false;
             StopSender();
             DisableVdd();
-            SetStatus("Stopped — virtual display hidden.", Color.DimGray);
+            SetStatus("Stopped - virtual display hidden.", Color.DimGray);
             btnStart.Enabled = true;
         }
 
