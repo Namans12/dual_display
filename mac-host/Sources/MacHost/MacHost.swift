@@ -651,7 +651,7 @@ struct MacHostMain {
             return (display, display.width, display.height, nil)
         }
 
-        guard let virtualDisplay = VirtualDisplay() else {
+        guard let virtualDisplay = VirtualDisplay(fps: options.fps) else {
             throw MacHostError.virtualDisplay(
                 "Could not create the virtual display (private CGVirtualDisplay API " +
                 "unavailable?). Pass --display N to capture an existing display.")
@@ -673,9 +673,9 @@ struct MacHostMain {
                 "Virtual display is online but ScreenCaptureKit does not list it.")
         }
         print("Virtual display \(virtualDisplay.adopted ? "adopted from an earlier run" : "online"): " +
-              "\(VirtualDisplay.width)x\(VirtualDisplay.height)@\(Int(VirtualDisplay.refreshHz)) " +
+              "\(virtualDisplay.width)x\(virtualDisplay.height)@\(Int(virtualDisplay.refreshHz)) " +
               "(id \(virtualDisplay.displayID))")
-        return (display, VirtualDisplay.width, VirtualDisplay.height, virtualDisplay)
+        return (display, virtualDisplay.width, virtualDisplay.height, virtualDisplay)
     }
 
     static func main() async {

@@ -14,28 +14,46 @@ import Foundation
 // a duplicate. `--remove-display` (CGRestorePermanentDisplayConfiguration) is a
 // safety valve if one ever lingers.
 final class VirtualDisplay {
-    // Galaxy Tab S9 Ultra: 2960x1848 (16:10) on a 14.6" panel.
-    static let width = 2960
-    static let height = 1848
-    static let refreshHz = 60.0
+    // Galaxy Tab S9 Ultra: 2960x1848 (16:10) on a 14.6" panel, up to 120 Hz.
+    // At 120 fps the display drops to 1920x1200 — the Windows host's measured
+    // sweet spot: native-res 120 overruns the capture+encode+decode pipeline,
+    // and the tablet upscales 16:10 cleanly.
+    static let nativeWidth = 2960
+    static let nativeHeight = 1848
     private static let vendorID: UInt32 = 0x3456
     private static let productID: UInt32 = 0x4544
     private static let sizeMm = CGSize(width: 314.6, height: 196.4)
 
+    static func target(forFps fps: Int) -> (width: Int, height: Int, hz: Double) {
+        fps >= 120 ? (1920, 1200, 120.0) : (nativeWidth, nativeHeight, 60.0)
+    }
+
+    let width: Int
+    let height: Int
+    let refreshHz: Double
     private let handle: NSObject?  // nil when adopted from an earlier run
     let displayID: CGDirectDisplayID
     let adopted: Bool
 
-    init?() {
-        if let existing = Self.findExisting() {
+    init?(fps: Int) {
+        let target = Self.target(forFps: fps)
+        width = target.width
+        height = target.height
+        refreshHz = target.hz
+
+        // Adopt a not-yet-reclaimed instance from a fast restart — but only if
+        // it carries the mode this run needs (we can't applySettings on an
+        // adopted display: no object handle).
+        if let existing = Self.findExisting(),
+           Self.hasMode(existing, width: width, height: height, hz: refreshHz) {
             handle = nil
             displayID = existing
             adopted = true
             return
         }
         guard let created = CVDCreate("Extended Display",
-                                      UInt32(Self.width), UInt32(Self.height),
-                                      Self.refreshHz, Self.sizeMm, true) else {
+                                      UInt32(width), UInt32(height),
+                                      refreshHz, Self.sizeMm, true) else {
             return nil
         }
         handle = created
@@ -50,6 +68,17 @@ final class VirtualDisplay {
         return ids.prefix(Int(count)).first {
             CGDisplayVendorNumber($0) == Self.vendorID &&
             CGDisplayModelNumber($0) == Self.productID
+        }
+    }
+
+    private static func hasMode(_ id: CGDirectDisplayID, width: Int, height: Int, hz: Double) -> Bool {
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+        guard let modes = CGDisplayCopyAllDisplayModes(id, options) as? [CGDisplayMode] else {
+            return false
+        }
+        return modes.contains {
+            $0.pixelWidth == width && $0.pixelHeight == height &&
+            abs($0.refreshRate - hz) < 0.5
         }
     }
 
@@ -87,20 +116,24 @@ final class VirtualDisplay {
         CGCompleteDisplayConfiguration(config, .forSession)
     }
 
-    // Ensures the active mode renders at native tablet pixels (2960x1848),
-    // preferring the HiDPI variant (1480x924 points @2x) so UI is readable on
-    // the 14.6" panel while the framebuffer — what we capture — stays native.
+    // Ensures the active mode renders at the target pixel size and refresh,
+    // preferring the HiDPI variant (points = pixels/2) so UI is readable on
+    // the 14.6" panel while the framebuffer — what we capture — stays full-res.
     func selectNativeMode() {
         let current = CGDisplayCopyDisplayMode(displayID)
         let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
         guard let modes = CGDisplayCopyAllDisplayModes(displayID, options) as? [CGDisplayMode] else {
             return
         }
-        let candidates = modes.filter { $0.pixelWidth == Self.width && $0.pixelHeight == Self.height }
+        let candidates = modes.filter {
+            $0.pixelWidth == width && $0.pixelHeight == height &&
+            abs($0.refreshRate - refreshHz) < 0.5
+        }
         guard let best = candidates.first(where: { $0.width < $0.pixelWidth }) ?? candidates.first else {
             return
         }
-        if let current, current.pixelWidth == best.pixelWidth, current.width == best.width {
+        if let current, current.pixelWidth == best.pixelWidth, current.width == best.width,
+           abs(current.refreshRate - best.refreshRate) < 0.5 {
             return  // already there
         }
         CGDisplaySetDisplayMode(displayID, best, nil)

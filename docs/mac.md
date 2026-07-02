@@ -24,7 +24,8 @@ pen, UDP, 120 fps and HDR remain Windows-only (see the matrix below).
 | Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse (stylus rides the mouse path) |
 | Desktop audio → tablet | ✅ | ❌ |
 | PIN pairing + AES-256-GCM encryption | ✅ all channels | ✅ video + touch (audio n/a) |
-| 120 fps mode switch, HDR | ✅ | ❌ (fixed capture size, SDR) |
+| 120 fps mode switch | ✅ 1920x1200@120 | ✅ 1920x1200@120 (`--fps 120`) |
+| HDR | ✅ HDR10 via VDD | ❌ (virtual display is SDR — see Limitations) |
 | Settings GUI | ✅ | ➖ CLI + a DMG launcher that automates USB |
 
 The current receiver app (versionCode 9) stays fully compatible with the Mac
@@ -115,6 +116,9 @@ right edge of your Mac and they appear on the tablet.
 - `--display N` skips the virtual display and captures an existing display by
   ScreenCaptureKit index instead — `--display 0` is the built-in panel, i.e. a
   **mirror**.
+- `--fps 120` creates the virtual display at **1920×1200@120** instead — the
+  same trade the Windows host makes: native-res 120 overruns the
+  capture/encode/decode pipeline, and the tablet upscales 16:10 cleanly.
 - Virtual-display lifecycle: the display exists only while MacHost runs and is
   **removed when it exits** (WindowServer reclaims a virtual display when its
   owner exits — verified for both quit and kill). A fast restart that finds the

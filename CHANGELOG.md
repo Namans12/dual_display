@@ -144,10 +144,19 @@ Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
     keyframe bursts may not fit through — video then stays on its last frame
     until a keyframe completes. Lower `--bitrate`/resolution, or use TCP.
 
+- **Stage C — 120 fps (`--fps 120`).** The virtual display is created at
+  **1920x1200@120** for fps ≥ 120 (same trade as the Windows host: native-res
+  120 overruns the pipeline; the tablet upscales 16:10 cleanly) and at native
+  2960x1848@60 otherwise. Fast-restart adoption only reuses a surviving
+  display if it carries the mode this run needs. Verified on-device (USB):
+  `UI Looks like 1920x1200 @ 120.00Hz`, decoder work-rate ramping to
+  ~109 works/s with fast-changing content (cursor-driven content coalesces
+  below a full 120, but this is conclusively past the 60 ceiling).
+
 The Mac host is no longer "video-only": it now does a native extended display,
 touch-back, LAN discovery, PIN pairing + AES-256-GCM, desktop audio, UDP
-transport, and HEVC. Remaining Windows-only: real multi-touch / pen pressure,
-120 fps mode-switch, HDR.
+transport, 120 fps, and HEVC. Remaining Windows-only: real multi-touch / pen
+pressure, HDR.
 
 ## v0.8.0 — 2026-07-02
 
