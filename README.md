@@ -48,3 +48,10 @@ ExtendedDisplaySender.exe --host 127.0.0.1 --port 5000 --fps 60 --width 2560 --h
 - Windows: DXGI Desktop Duplication through FFmpeg `ddagrab`, H.264 via NVENC/x264.
 - Mac: `ScreenCaptureKit`, H.264 via `VideoToolbox`.
 - Android: shared receiver, unchanged across Windows/Mac hosts.
+
+## Related Repositories
+
+| Repo | Relationship |
+|---|---|
+| [`wizlight`](https://github.com/Namans12/wizlight) | Screen capture streamed to smart bulbs; its Android app solves a similar capture-and-transmit problem with MediaProjection |
+| [`wiz2`](https://github.com/Namans12/wiz2) | Its working copy — `prefinal` adds `display_detection.py` for multi-monitor handling, directly relevant here |
