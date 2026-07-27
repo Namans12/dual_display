@@ -49,6 +49,31 @@ ExtendedDisplaySender.exe --host 127.0.0.1 --port 5000 --fps 60 --width 2560 --h
 - Mac: `ScreenCaptureKit`, H.264 via `VideoToolbox`.
 - Android: shared receiver, unchanged across Windows/Mac hosts.
 
+## Branches
+
+| Branch | Date | Ahead | Contents |
+|---|---|---|---|
+| `main` *(default)* | 2026-07-02 | — | Phase 1 proof of concept |
+| `Updated` | 2026-07-03 | **+35** | Full macOS host implementation — 48 files, +8405/−759 |
+
+**`Updated` is where the project actually got built.** Staged work on the macOS side:
+
+| Stage | What landed |
+|---|---|
+| 2 | Native `CGVirtualDisplay` extended display |
+| 3 | Touch-back — protocol v2 into `CGEvent` mouse injection |
+| 4a | `--wifi` UDP discovery (`EXTDISP?v1` parity) |
+| 4b | **PIN pairing + AES-256-GCM encryption**, SIGPIPE fix, reconnect handling |
+| 4c | HEVC encode option, docs and version alignment |
+
+Also adds `CHANGELOG.md`, `INSTALL.md`, `SECURITY.md`, `Fixes.md`, and DMG build output handling.
+
+```bash
+git checkout Updated
+```
+
+The security work on `4b` matters — the default branch streams your screen with no pairing or encryption.
+
 ## Related Repositories
 
 | Repo | Relationship |
