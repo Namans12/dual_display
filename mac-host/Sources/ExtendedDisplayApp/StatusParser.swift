@@ -35,6 +35,7 @@ struct HostStatusParser {
     private var audioActive = false
     private var accessibilityMissing = false
     private var touchAuthFailed = false
+    private var pairingMismatch = false
     private var noRoute = false
     private var fatal: String?
 
@@ -75,9 +76,13 @@ struct HostStatusParser {
         } else if l.hasPrefix("Streaming") || l.hasPrefix("Reconnected. Streaming") {
             phase = .streaming
             noRoute = false
+            pairingMismatch = false  // MacHost only prints this again once a connection survives
         } else if l.hasPrefix("Stream ended") || l.hasPrefix("Reconnecting to") {
             phase = .reconnecting
             udpStat = nil
+        } else if l.hasPrefix("Pairing code mismatch") {
+            pairingMismatch = true
+            phase = .reconnecting
         } else if l.hasPrefix("Touch: Accessibility permission not granted") {
             accessibilityMissing = true
         } else if l.hasPrefix("Touch: connected") {
@@ -100,6 +105,10 @@ struct HostStatusParser {
         if let f = fatal { return HostStatusParser.describeError(f) }
 
         var hint: String?
+        if pairingMismatch {
+            return HostStatus(line: StatusLine(kind: .error, text: "The tablet has a different pairing code."),
+                              hint: "Type the pairing code shown above into the code box at the top of the tablet's screen.")
+        }
         if touchAuthFailed {
             hint = "Touch was rejected: the pairing code on the tablet doesn't match."
         } else if phase == .unreachable && noRoute {

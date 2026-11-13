@@ -176,6 +176,7 @@ final class MouseInjector {
     }
 
     func handle(_ packet: TouchPacket) {
+        diagTrace("TOUCH \(packet.type) tool=\(packet.tool)")
         let point = mapToGlobal(packet.nx, packet.ny)
         lastPoint = point
         // tool 0 = finger (plain mouse semantics); 1/2 = stylus/eraser, which

@@ -368,8 +368,11 @@ final class AnnexBEncoder {
     private var session: VTCompressionSession?
     private var sentParameterSets = false
     private var frameCount: Int64 = 0
+    fileprivate var reportedSendError = false
+    var quietErrors = false  // set while the supervisor is already reporting a pairing mismatch
 
-    init(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrate: Int, sender: VideoSender) throws {
+    init(codec: VideoCodec, width: Int, height: Int, fps: Int, bitrate: Int,
+         keyframeEverySeconds: Int = 1, sender: VideoSender) throws {
         self.sender = sender
         self.codec = codec
         self.width = Int32(width)
@@ -383,7 +386,12 @@ final class AnnexBEncoder {
             do {
                 try encoder.handleEncodedSample(sampleBuffer)
             } catch {
-                fputs("Encode callback error: \(error)\n", stderr)
+                // Every frame still in flight fails the same way once the socket
+                // is gone — one line per connection is enough.
+                if !encoder.reportedSendError && !encoder.quietErrors {
+                    fputs("Encode callback error: \(error)\n", stderr)
+                }
+                encoder.reportedSendError = true
             }
         }
 
@@ -405,7 +413,8 @@ final class AnnexBEncoder {
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: fps))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                             value: NSNumber(value: fps * max(keyframeEverySeconds, 1)))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate))
         if codec == .hevc {
@@ -868,6 +877,13 @@ struct MacHostMain {
             // clears the sender's `alive` flag), then reconnect — like the
             // Windows host restarting the stream on disconnect.
             var reconnecting = false
+            // A tablet holding a DIFFERENT pairing key closes the encrypted
+            // stream on the first frame it can't authenticate, so the host sees
+            // connect → write failure → reconnect, forever. Two such short-lived
+            // connections in a row and we say what it is (once), then retry
+            // quietly and slower until a connection survives.
+            var shortDrops = 0
+            var mismatchReported = false
             while !g_stop.isSet {
                 let videoSender: VideoSender
                 if options.udp {
@@ -878,34 +894,64 @@ struct MacHostMain {
                                                                       port: options.port,
                                                                       key: pairKey))
                 } else {
-                    print(reconnecting ? "Reconnecting to \(options.host):\(options.port)…"
-                                       : "Connecting to \(options.host):\(options.port)")
+                    if !mismatchReported {
+                        print(reconnecting ? "Reconnecting to \(options.host):\(options.port)…"
+                                           : "Connecting to \(options.host):\(options.port)")
+                    }
                     guard let writer = await connectWithRetry(host: options.host, port: options.port) else {
                         break  // stopping
                     }
                     videoSender = try VideoSender(writer: writer, key: pairKey)
                 }
 
+                // TCP never loses data, and every (re)connection starts a fresh
+                // encoder with its own keyframe, so periodic keyframes only cost
+                // bits there: at one per second they were ~half of everything
+                // sent while scrolling text (≈490 KB each vs ≈9 KB per frame).
+                // UDP keeps one per second — it is the only loss recovery it has.
                 let encoder = try AnnexBEncoder(codec: codec, width: encodeWidth, height: encodeHeight,
                                                 fps: options.fps, bitrate: options.bitrate,
+                                                keyframeEverySeconds: options.udp ? 1 : 4,
                                                 sender: videoSender)
+                encoder.quietErrors = mismatchReported
                 let host = ScreenCaptureHost(
                     encoder: encoder,
                     audioSink: audioBridge.map { bridge in { bridge.enqueue($0) } })
                 try await host.start(display: selection.display, width: encodeWidth,
                                      height: encodeHeight, fps: options.fps)
-                print(reconnecting ? "Reconnected. Streaming." : "Streaming. Press Ctrl+C to stop.")
+                let connectedAt = Date()
+                let survivedAfter = 3.0  // seconds a connection must last to count as healthy
+                if !mismatchReported {
+                    print(reconnecting ? "Reconnected. Streaming." : "Streaming. Press Ctrl+C to stop.")
+                }
 
                 // Wait until the tablet drops the stream (TCP only) or the user quits.
                 while !g_stop.isSet && videoSender.alive.isSet {
                     try? await Task.sleep(nanoseconds: 200_000_000)
+                    if mismatchReported && Date().timeIntervalSince(connectedAt) >= survivedAfter {
+                        // The tablet accepted the stream: the code was fixed.
+                        mismatchReported = false
+                        shortDrops = 0
+                        encoder.quietErrors = false
+                        print("Reconnected. Streaming.")
+                    }
                 }
                 await host.stop()
                 encoder.finish()  // flush the session before its reference drops
                 if !g_stop.isSet {
-                    print("Stream ended (tablet disconnected or app closed). Reconnecting…")
+                    let lived = Date().timeIntervalSince(connectedAt)
+                    shortDrops = (pairKey != nil && !options.udp && lived < survivedAfter) ? shortDrops + 1 : 0
+                    if shortDrops >= 2 && !mismatchReported {
+                        mismatchReported = true
+                        print("Pairing code mismatch — the tablet keeps closing the encrypted stream. " +
+                              "Enter this Mac's pairing code on the tablet (it shows a code box at the " +
+                              "top of the screen); MacHost keeps retrying.")
+                    } else if !mismatchReported {
+                        print("Stream ended (tablet disconnected or app closed). Reconnecting…")
+                    }
                     reconnecting = true
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // gentle backoff
+                    // Gentle backoff; slower while we already know why it fails.
+                    try? await Task.sleep(nanoseconds: mismatchReported ? 3_000_000_000 : 1_000_000_000)
                 }
             }
 

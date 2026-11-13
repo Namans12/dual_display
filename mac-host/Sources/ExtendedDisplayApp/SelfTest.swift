@@ -198,6 +198,10 @@ func runSelfTests() -> Int32 {
     expect(text("USB", usbStream + ["Stream ended (x). Reconnecting…", "Reconnecting to 127.0.0.1:5000…", "Reconnected. Streaming."]).hasPrefix("Streaming"), "reconnected → streaming")
     expect(run("USB", usbStream + ["Touch: Accessibility permission not granted yet — tablet touches will not move the cursor"]).hint?.contains("Accessibility") == true, "Accessibility hint")
     expect(run("USB", usbStream + ["Touch pairing/auth failed - check the code on the tablet."]).hint?.contains("pairing code") == true, "touch auth failure hint")
+    let mismatch = "Pairing code mismatch — the tablet keeps closing the encrypted stream. Enter this Mac's pairing code on the tablet (it shows a code box at the top of the screen); MacHost keeps retrying."
+    expect(run("USB", usbStream + [mismatch]).line.kind == .error, "pairing mismatch is an error status")
+    expect(run("USB", usbStream + [mismatch]).line.text.contains("different pairing code"), "pairing mismatch text")
+    expect(run("USB", usbStream + [mismatch, "Reconnected. Streaming."]).line.kind == .ok, "pairing mismatch clears once streaming resumes")
     expect(run("USB", usbStream + ["Touch pairing/auth failed - check the code on the tablet.", "Touch: connected — tablet touches control the Mac (encrypted)."]).hint == nil, "touch auth hint clears when connected")
     expect(text("USB", usbStream + ["Stopping."]) == "Stopping…", "stopping")
     let tcc = run("USB", ["Error: The user declined TCCs for application, window, display capture\n"])

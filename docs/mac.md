@@ -20,14 +20,14 @@ real multi-touch injection and HDR (see the matrix and Limitations).
 | Capability | Windows host (v0.8.0) | Mac host |
 |---|---|---|
 | Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264 + HEVC, TCP + UDP |
-| Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848@60 HiDPI (default) |
+| Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848 HiDPI, 60 fps (default) |
 | Tablet discovery | ✅ UDP broadcast | ✅ `--wifi` (UDP broadcast), or `--host <ip>` |
 | Touch / S Pen → host | ✅ multi-touch + pen | ✅ single-pointer mouse + S Pen pressure (tablet-point events) |
 | Desktop audio → tablet | ✅ WASAPI loopback | ✅ ScreenCaptureKit system audio (`--audio`) |
 | PIN pairing + AES-256-GCM encryption | ✅ all channels | ✅ video + touch (audio n/a) |
 | 120 fps mode switch | ✅ 1920x1200@120 | ✅ 1920x1200@120 (`--fps 120`) |
 | HDR | ✅ HDR10 via VDD | ❌ (virtual display is SDR — see Limitations) |
-| Settings GUI | ✅ | ➖ CLI + a DMG launcher that automates USB |
+| Settings GUI | ✅ | ✅ native window (SwiftUI) in ExtendedDisplay.app |
 
 The current receiver app (versionCode 9) stays fully compatible with the Mac
 host: a plaintext TCP stream has no `EXVE` marker, so the app feeds it straight
@@ -65,18 +65,32 @@ On a Mac, from the repo root:
 ./installers/mac/build-dmg.sh          # optionally: path to the receiver APK
 ```
 
-This builds `MacHost` (release), wraps it into `ExtendedDisplay.app` with a
-launcher that automates the USB path (waits for the tablet on adb, installs the
-bundled APK if missing, runs `adb forward tcp:5000 tcp:5000`, starts the
-receiver activity, then runs `MacHost --host 127.0.0.1`), bundles darwin
-platform-tools, ad-hoc signs the bundle, and emits
+This builds `MacHost` and the launcher window (release), bundles them with the
+receiver APK and darwin platform-tools into `ExtendedDisplay.app`, runs the
+launcher's `--selftest`, ad-hoc signs the bundle, and emits
 `installers/mac/dist/ExtendedDisplay.dmg`.
 
-First run: right-click → **Open** (ad-hoc signature), grant Screen Recording.
-The launcher logs to `~/Library/Logs/ExtendedDisplay.log`.
+First run: right-click → **Open** (ad-hoc signature), then grant Screen
+Recording, Accessibility (touch) and — for Wi-Fi — Local Network to
+**Extended Display** under System Settings → Privacy & Security. A rebuilt
+(re-signed) app may need those grants again.
 
-> Verified end-to-end on macOS 26 (Apple silicon): build → mount → launcher →
-> adb forward → streaming, receiver v9.
+The window offers **Connection** (USB, or Wi-Fi with an optional tablet IP and
+Low-latency UDP), **Quality** (Best resolution / Balanced / Smooth motion),
+**Options** (Touch input, HEVC, Desktop audio with Mute Mac speakers and A/V
+sync delay, Encrypt link), the **pairing code** with *New code*, **Start
+Streaming / Stop**, and a live status line. Settings are remembered between
+launches.
+
+Start waits for the tablet over USB, installs or upgrades the bundled receiver
+if needed, sets up the adb forwards, opens the receiver, and runs MacHost as a
+child process. Stop (or quitting) shuts MacHost down cleanly, which removes the
+virtual display. MacHost's output goes to `~/Library/Logs/ExtendedDisplay.log`.
+
+> Status (2026-11-13, macOS 27): the bundle builds, signs and passes both
+> self-tests, and the window opens. Pressing **Start** against a tablet has
+> not been exercised yet — until it has, the manual commands below are the
+> verified path.
 
 ## Quick start — manual build / run
 
@@ -169,16 +183,53 @@ everything else, and the tablet stays silent until the code is entered.
 - Audio and video are separate streams with no shared clock; lip-sync is
   approximate (same as the Windows host).
 
-## DMG launcher settings (no GUI needed)
+## Launcher files
 
-The packaged launcher reads two optional files from
+The launcher window keeps two files in
 `~/Library/Application Support/ExtendedDisplay/`:
 
-- `pairing.code` — an 8-char pairing code; exported as `EXTDISPLAY_KEY` so the
-  launcher's stream is encrypted (Windows-GUI parity: its persisted code lives
-  in `%LOCALAPPDATA%\ExtendedDisplay\pairing.code`).
-- `options` — extra MacHost arguments on one line, e.g.
-  `--audio --mute-local --fps 120`.
+- `pairing.code` (mode 0600) — the pairing code shown in the window, passed to
+  MacHost as `EXTDISPLAY_KEY`. An existing code is reused, never overwritten
+  silently (Windows-GUI parity: `%LOCALAPPDATA%\ExtendedDisplay\pairing.code`).
+- `options` — optional extra MacHost arguments on one line, appended after the
+  window's choices, e.g. `--eraser-key e`.
+
+## Smoothness: how the 60 fps is achieved
+
+Two things about macOS shape the video path (both measured on macOS 27, M4,
+with a window drawing at 60 fps on the virtual display):
+
+- **The virtual display is declared at 120 Hz, even for a 60 fps stream.**
+  Declared at 60 Hz, ScreenCaptureKit only delivered ~30 frames/s from it
+  (evenly 33 ms apart); declared at 120 Hz it delivers a steady 60 at the full
+  2960x1848. `--fps 120` (1920x1200) did not deliver more than 60 real frames/s
+  on that Mac, so it currently trades resolution for nothing there.
+- **ScreenCaptureKit sends a frame only when the screen changes**, and the
+  receiver (≤ v9) presents a decoded frame only when the next one arrives. So
+  MacHost re-submits the last frame for ~250 ms after the screen goes still;
+  without that the newest frame (the cursor leaving the tablet, the result of
+  a tap) stayed undisplayed until something else changed.
+
+Over TCP a keyframe is sent every 4 s (every 1 s over UDP, where it is the only
+loss recovery). `EXTDISP_TRACE=1` logs every frame in/out of the encoder, every
+re-submission and every touch packet to stderr for latency work.
+
+Colour was checked with 16 sRGB patches drawn on the virtual display and read
+back from a tablet screenshot: every patch matched within 1/255. If the tablet
+still looks more saturated than the Mac, that is the tablet's own display mode
+(Samsung: Settings → Display → Screen mode → **Natural** instead of Vivid).
+
+## S Pen eraser key (`--eraser-key`)
+
+`--eraser-key <name>` holds a key on the Mac while a stylus's eraser end is
+touching (pressed just before the mouse-down, released just after the
+mouse-up; never while hovering; released if the tablet disconnects
+mid-stroke). macOS offers no way to inject a real ink eraser, so set this to
+the key your drawing app binds to its eraser tool. Names (case-insensitive):
+`a`–`z`, `0`–`9`, `delete`, `forwarddelete`, `space`, `tab`, `escape` — these
+are US-layout key positions. Off by default. The key logic is covered by
+`--selftest`; it has not been tried with a real eraser-tip stylus (the S Pen
+has none).
 
 ## Pairing + encryption (optional)
 
@@ -230,6 +281,11 @@ Verify the KDF matches the other platforms byte-for-byte:
   `--bitrate`/`--width/--height`, or just use TCP (the default), which is
   immune. The Mac host paces large bursts and never blocks encoding on a
   congested link (drops instead).
+- **`Pairing code mismatch — the tablet keeps closing the encrypted stream`**
+  (older builds: an endless `Socket write failed` / `Reconnecting…` loop) →
+  the tablet holds a different pairing code than this Mac. Type the Mac's code
+  (launcher window, or `pairing.code`) into the code box at the top of the
+  tablet's screen; MacHost keeps retrying and resumes on its own.
 - **App stays on "Waiting…"** → MacHost isn't reaching the tablet — verify with
   `nc -vz <tablet-ip> 5000`.
 - **Choppy / lagging** → lower `--fps` (30) or `--bitrate`; the TCP write runs
@@ -244,7 +300,8 @@ Verify the KDF matches the other platforms byte-for-byte:
 - Touch is single-pointer (macOS has no public API to inject real multi-touch
   into arbitrary apps — Windows has `InjectTouchInput`). S Pen **pressure** is
   carried on the mouse events as tablet-point data, so pressure-aware apps
-  respond; full eraser semantics need tablet *proximity* events (future).
+  respond. There is no true eraser: by default the eraser end draws like the
+  pen tip; `--eraser-key` approximates it with a key press (see above).
 - **No HDR**: the virtual display's framebuffer is SDR — the known
   CGVirtualDisplay surface exposes no EDR capability (Windows gets HDR from
   its VDD driver). Capturing a real HDR-capable display could grow this later.
@@ -253,5 +310,6 @@ Verify the KDF matches the other platforms byte-for-byte:
   so in practice this only matters if you wanted to drop it mid-session.
 - Audio/video are separate streams with no shared clock (lip-sync approximate,
   tune `--audio-delay-ms`) — same as the Windows host.
-- No settings GUI — the DMG launcher plus the `pairing.code`/`options` files
-  cover the plug-and-play story (see above).
+- The receiver fix that presents each frame as soon as it is decoded is in
+  the source but not yet in a built APK (v9 is what ships); the Mac host's
+  frame re-submission covers it meanwhile.

@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — 2026-11-13
+
+Mac host, verified on macOS 27 (M4) against receiver v9 on a Galaxy Tab S9 Ultra.
+
+- **Fixed: stale last frame.** The cursor stayed on the tablet after moving
+  back to the Mac, and taps/updates showed one event late. The receiver only
+  presents a decoded frame when the next NAL arrives and ScreenCaptureKit only
+  sends frames on change; MacHost now re-submits the last frame for ~250 ms
+  after the screen goes still. Verified: single cursor moves appear on the
+  tablet at once (before, it stayed three frames behind indefinitely).
+- **Fixed: 30 fps masquerading as 60.** A virtual display declared at 60 Hz
+  only yielded ~30 captured frames/s; it is now declared at 120 Hz and yields
+  a steady 60 at 2960x1848 (279 of 283 frame gaps exactly one frame apart).
+- **Fixed: silent reconnect loop on a pairing-code mismatch.** MacHost now
+  prints one `Pairing code mismatch` line, retries quietly every 3 s, and
+  resumes by itself once the right code is on the tablet. One send-error line
+  per connection instead of one per frame.
+- **TCP keyframes every 4 s** instead of every second (they were ~half of all
+  bytes while scrolling text).
+- **Native launcher window** replaces the silent bash launcher in
+  ExtendedDisplay.app (connection, quality, options, pairing code, Start/Stop,
+  live status). Builds, signs, self-tests; Start against a tablet not yet
+  exercised.
+- **`--eraser-key <name>`** (opt-in): holds a key while a stylus eraser end
+  touches. Self-tested; untested with real eraser hardware.
+- **Receiver (source only, no APK yet):** drain decoder output on idle so a
+  frame is presented without waiting for the next NAL.
+- `EXTDISP_TRACE=1` per-frame/touch trace. Colour path measured accurate to
+  1/255; Wi-Fi discovery + stream verified end to end.
+
 ## v0.9.0 — 2026-07-03
 
 Mac host: from video-only phase 1 toward Windows parity. Verified on macOS 26
