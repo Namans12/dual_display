@@ -76,7 +76,7 @@ Recording, Accessibility (touch) and — for Wi-Fi — Local Network to
 (re-signed) app may need those grants again.
 
 The window offers **Connection** (USB, or Wi-Fi with an optional tablet IP and
-Low-latency UDP), **Quality** (Best resolution / Balanced / Smooth motion),
+Low-latency UDP), **Quality** (Best resolution / Balanced / Fastest response),
 **Options** (Touch input, HEVC, Desktop audio with Mute Mac speakers and A/V
 sync delay, Encrypt link), the **pairing code** with *New code*, **Start
 Streaming / Stop**, and a live status line. Settings are remembered between
@@ -87,10 +87,18 @@ if needed, sets up the adb forwards, opens the receiver, and runs MacHost as a
 child process. Stop (or quitting) shuts MacHost down cleanly, which removes the
 virtual display. MacHost's output goes to `~/Library/Logs/ExtendedDisplay.log`.
 
-> Status (2026-11-13, macOS 27): the bundle builds, signs and passes both
-> self-tests, and the window opens. Pressing **Start** against a tablet has
-> not been exercised yet — until it has, the manual commands below are the
-> verified path.
+Quality presets: **Best resolution** adds `--bitrate 40000000`; **Balanced** is MacHost's default (2960x1848,
+60 fps, 25 Mbps ceiling); **Fastest response** scales the capture to 1920x1200 (`--width 1920 --height 1200`) —
+measured over USB it halves the encode time (7.6 vs 14.5 ms) and puts a touch on the wire in 16 ms instead of 24,
+with text at about 72% of Balanced's sharpness.
+
+On USB, Start restarts the tablet app: receivers up to v9 keep the decoder of their first stream, so switching
+H.264 ↔ HEVC otherwise gave no picture (fixed in the receiver source for v10).
+
+> Status (2026-11-13, macOS 27): pressing **Start** was exercised on device — the app found the tablet, set up
+> USB, launched MacHost and correctly reported the missing Screen Recording permission with an **Open Settings**
+> button. A full stream through the app (after granting its permissions), Stop and quit with a live stream are
+> not verified yet; the manual commands below are the fully verified path.
 
 ## Quick start — manual build / run
 
@@ -209,6 +217,11 @@ with a window drawing at 60 fps on the virtual display):
   MacHost re-submits the last frame for ~250 ms after the screen goes still;
   without that the newest frame (the cursor leaving the tablet, the result of
   a tap) stayed undisplayed until something else changed.
+
+H.264 is encoded with VideoToolbox's low-latency rate control (about 15 ms per frame instead of 21 at
+2960x1848@60 on an M4, same fidelity against the Mac's framebuffer). Measured end to end with scrolling text at
+full resolution, the tablet presented 58–59 frames/s over both USB and Wi-Fi; the video socket's round trip was
+about 1 ms over USB and 7 ms over Wi-Fi, with no send backlog building up.
 
 Over TCP a keyframe is sent every 4 s (every 1 s over UDP, where it is the only
 loss recovery). `EXTDISP_TRACE=1` logs every frame in/out of the encoder, every

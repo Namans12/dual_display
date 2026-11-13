@@ -27,6 +27,17 @@ Mac host, verified on macOS 27 (M4) against receiver v9 on a Galaxy Tab S9 Ultra
   touches. Self-tested; untested with real eraser hardware.
 - **Receiver (source only, no APK yet):** drain decoder output on idle so a
   frame is presented without waiting for the next NAL.
+- **Low-latency H.264 encoding** (VideoToolbox low-latency rate control): ~15 ms
+  per frame instead of ~21 ms, same fidelity.
+- **"Fastest response" preset** replaces "Smooth motion (120 fps)" in the
+  launcher (1920x1200 capture: encode 7.6 vs 14.5 ms, touch on the wire in 16
+  vs 24 ms). 120 fps never delivered more than 60 real frames/s on a 60 Hz Mac.
+- **Receiver (source only):** status label fades once video shows; codec is
+  re-detected per connection (switching H.264 <-> HEVC gave no picture on v9).
+  The launcher restarts the tablet app on USB Start to cover v9.
+- Measured: tablet presents 58–59 fps over USB and over Wi-Fi at 2960x1848;
+  link round trip ~1 ms (USB) / ~7 ms (Wi-Fi). Windows build steps and a
+  hand-off prompt: docs/build-receiver-on-windows.md, docs/windows-handoff.md.
 - `EXTDISP_TRACE=1` per-frame/touch trace. Colour path measured accurate to
   1/255; Wi-Fi discovery + stream verified end to end.
 
