@@ -539,6 +539,17 @@ private class H264TcpReceiver(
     @Volatile private var videoSealer: Sealer? = null
     @Volatile private var videoShowing = false
 
+    // Bumped each time a host connects over TCP. A new connection is a new
+    // stream and may use the other codec (H.264 <-> HEVC), so the running decode
+    // session ends and the next one re-detects from the new stream's parameter
+    // sets. (Before this the decoder chosen for the first stream was kept for
+    // the life of the app, and switching codec on the host gave no picture.)
+    private val streamGeneration = java.util.concurrent.atomic.AtomicInteger(0)
+    // A NAL the decode thread had already taken from the queue when it noticed
+    // the generation change; handed to the next session so the new stream's
+    // first parameter set is not lost. Decode thread only.
+    private var carriedNal: ByteArray? = null
+
     private fun setShowing(showing: Boolean) {
         if (videoShowing != showing) {
             videoShowing = showing
@@ -588,6 +599,8 @@ private class H264TcpReceiver(
                 }
                 server!!.accept().use { socket ->
                     socket.tcpNoDelay = true
+                    nalQueue.clear()  // leftovers of the previous stream
+                    streamGeneration.incrementAndGet()
                     onStatus("Connected (USB/TCP): ${socket.inetAddress.hostAddress}")
                     // Peek 4 bytes. Encrypted streams begin with the 'EXVE' marker;
                     // plaintext streams begin with an Annex-B start code (push those
@@ -720,6 +733,20 @@ private class H264TcpReceiver(
         return MIME_AVC
     }
 
+    // A decode session may only begin at a parameter set: H.264 SPS (type 7) or
+    // HEVC VPS/SPS/PPS (32-34). Anything else can neither identify the codec nor
+    // be decoded yet, so it is skipped until one arrives (hosts send them with
+    // every keyframe). H.264 PPS (8) is deliberately not accepted: an HEVC IDR's
+    // first byte also reads as 8 under the H.264 mask.
+    private fun startsStream(nal: ByteArray): Boolean {
+        val sc = if (nal.size >= 4 && nal[2] == 0.toByte()) 4 else 3
+        if (nal.size <= sc) return false
+        val header = nal[sc].toInt() and 0xFF
+        if (header and 0x80 != 0) return false
+        val hevcType = (header shr 1) and 0x3F
+        return hevcType in 32..34 || (header and 0x1F) == 7
+    }
+
     // Consumes NALs from the shared queue (fed by TCP or UDP) and decodes them.
     // Resets the codec on error (e.g. surface loss) and resumes.
     private fun decodeLoop() {
@@ -736,12 +763,15 @@ private class H264TcpReceiver(
     }
 
     private fun decodeSession() {
-        // Wait for the first NAL to pick H.264 vs HEVC (no codec header needed).
+        // Wait for a parameter set to pick H.264 vs HEVC (no codec header needed).
         var firstNal: ByteArray? = null
         while (running.get() && firstNal == null) {
-            firstNal = nalQueue.poll(500, TimeUnit.MILLISECONDS)
+            val candidate = carriedNal ?: nalQueue.poll(500, TimeUnit.MILLISECONDS)
+            carriedNal = null
+            if (candidate != null && startsStream(candidate)) firstNal = candidate
         }
         val first = firstNal ?: return
+        val generation = streamGeneration.get()
         val mime = detectCodec(first)
 
         val decoder = MediaCodec.createDecoderByType(mime)
@@ -772,6 +802,13 @@ private class H264TcpReceiver(
                 // drain left the newest frame undisplayed whenever the host
                 // paused (the Mac host only sends frames when the screen changes).
                 val current = nal ?: nalQueue.poll(4, TimeUnit.MILLISECONDS)
+                if (streamGeneration.get() != generation) {
+                    // A new host connection started: end this session (the
+                    // finally below releases the decoder) and let the next one
+                    // pick the codec again.
+                    carriedNal = current
+                    return
+                }
                 if (current == null) {
                     drainOutput(decoder, info)
                     continue
