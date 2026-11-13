@@ -59,6 +59,8 @@ private const val DISCOVERY_REPLY_PREFIX = "EXTDISP!v1|"
 // Placeholder size — MediaCodec adapts to the real resolution carried in the SPS.
 private const val INITIAL_WIDTH = 320
 private const val INITIAL_HEIGHT = 240
+// How long a status message stays up once video is on screen.
+private const val STATUS_LINGER_MS = 2500L
 private const val MIME_AVC = "video/avc"
 private const val MIME_HEVC = "video/hevc"
 
@@ -118,6 +120,29 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private val audioReceiver = AudioReceiver()
     private val discovery = DiscoveryResponder()
     @Volatile private var pairingKey: ByteArray? = null
+
+    // The status label is for when there is no picture (waiting, connecting, a
+    // decoder reset). Once video is on screen it would just sit on top of the
+    // desktop, so any message then shows briefly and fades out.
+    private var videoShowing = false
+    private val hideStatus = Runnable { statusView.visibility = View.GONE }
+
+    private fun showStatus(text: String) {
+        statusView.removeCallbacks(hideStatus)
+        statusView.text = text
+        statusView.visibility = View.VISIBLE
+        if (videoShowing) statusView.postDelayed(hideStatus, STATUS_LINGER_MS)
+    }
+
+    private fun setVideoShowing(showing: Boolean) {
+        videoShowing = showing
+        statusView.removeCallbacks(hideStatus)
+        if (showing) {
+            statusView.postDelayed(hideStatus, STATUS_LINGER_MS)
+        } else {
+            statusView.visibility = View.VISIBLE
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -265,7 +290,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 .putString("key_b64", android.util.Base64.encodeToString(key, android.util.Base64.NO_WRAP))
                 .apply()
             Log.i(TAG, "Paired: encryption enabled (key ${Crypto.hex(key).take(8)}…)")
-            statusView.text = "Paired — link encrypted"
+            showStatus("Paired — link encrypted")
             // Show the completed code (green), then tuck the panel away — deferred so
             // the final character is visible before it disappears.
             pairInput.isEnabled = false
@@ -404,7 +429,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         receiver?.stop()
         receiver = H264TcpReceiver(
             surface = holder.surface,
-            onStatus = { status -> runOnUiThread { statusView.text = status } },
+            onStatus = { status -> runOnUiThread { showStatus(status) } },
+            onVideoShowing = { showing -> runOnUiThread { setVideoShowing(showing) } },
             onVideoSize = { w, h -> runOnUiThread { applyVideoSize(w, h) } },
             onEncrypted = { enc -> touchUplink.setKey(if (enc) pairingKey else null) }
         ).also { it.setKey(pairingKey); it.start() }
@@ -498,6 +524,9 @@ private class H264TcpReceiver(
     private val surface: Surface,
     private val onStatus: (String) -> Unit,
     private val onVideoSize: (Int, Int) -> Unit,
+    // true once a decoded frame has been presented, false when the host's
+    // connection ends — drives hiding/showing the on-screen status label.
+    private val onVideoShowing: (Boolean) -> Unit = {},
     // Reports whether the incoming video stream is encrypted (TCP: EXVE marker;
     // UDP: first-packet latch) so the activity can match the touch channel to the
     // session — a saved key against an unencrypted sender must not seal touches.
@@ -508,6 +537,14 @@ private class H264TcpReceiver(
     private var udpSocket: java.net.DatagramSocket? = null
     private var codec: MediaCodec? = null
     @Volatile private var videoSealer: Sealer? = null
+    @Volatile private var videoShowing = false
+
+    private fun setShowing(showing: Boolean) {
+        if (videoShowing != showing) {
+            videoShowing = showing
+            onVideoShowing(showing)
+        }
+    }
 
     /** Set the pairing key to decrypt the video, or null for plaintext. Read live
      *  per-frame, so entering the code mid-stream starts decryption without a
@@ -605,6 +642,11 @@ private class H264TcpReceiver(
                 if (running.get()) Thread.sleep(300)
             } finally {
                 closeServer()
+                // The picture on screen is now a frozen last frame: say so.
+                if (running.get() && videoShowing) {
+                    setShowing(false)
+                    onStatus("Host disconnected — waiting for it to reconnect")
+                }
             }
         }
     }
@@ -760,7 +802,10 @@ private class H264TcpReceiver(
         while (true) {
             val outputIndex = decoder.dequeueOutputBuffer(info, 0)
             when {
-                outputIndex >= 0 -> decoder.releaseOutputBuffer(outputIndex, true)
+                outputIndex >= 0 -> {
+                    decoder.releaseOutputBuffer(outputIndex, true)
+                    setShowing(true)
+                }
                 outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                     val format = decoder.outputFormat
                     // Crop rectangle is the true visible size; KEY_WIDTH/HEIGHT
