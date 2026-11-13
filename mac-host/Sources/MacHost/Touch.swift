@@ -2,6 +2,7 @@ import ApplicationServices
 import CoreGraphics
 import CryptoKit
 import Darwin
+import Carbon.HIToolbox  // kVK_ANSI_* virtual keycodes (constants only)
 import Foundation
 
 // Touch protocol v2 — fixed 28-byte big-endian packets from the tablet's
@@ -63,32 +64,52 @@ func parseTouchPacket(_ bytes: [UInt8]) -> TouchPacket? {
     )
 }
 
-// Maps normalized tablet coordinates onto the captured display and drives the
-// mouse via CGEvent posted to the HID tap (the SendInput equivalent).
-// Single-pointer semantics, like the Windows host's v1 fallback path: the
-// first contact down owns the cursor until it lifts; other pointers are
-// ignored meanwhile. Stylus and eraser ride the same mouse path for now
-// (pen/pressure injection is a later milestone).
-final class MouseInjector {
-    private let displayID: CGDirectDisplayID
-    private var ownerPointerId = -1  // -1 = button not down
-    private var lastPoint = CGPoint.zero
-    private var lastUpTime = Date.distantPast
-    private var lastUpPoint = CGPoint.zero
-    private var clickState: Int64 = 1
+// --eraser-key: name → macOS virtual keycode. macOS can't inject a real ink
+// eraser (synthetic tablet-proximity events aren't correlated by AppKit), so an
+// eraser-tool contact instead holds a key that drawing apps typically bind to
+// their eraser tool. These are the ANSI virtual keycodes, which are
+// *positional* (the physical key at that spot on a US layout), not
+// layout-aware: on e.g. AZERTY, "a" presses whatever key sits where QWERTY has A.
+enum EraserKey {
+    static let table: [String: CGKeyCode] = [
+        "a": CGKeyCode(kVK_ANSI_A), "b": CGKeyCode(kVK_ANSI_B), "c": CGKeyCode(kVK_ANSI_C),
+        "d": CGKeyCode(kVK_ANSI_D), "e": CGKeyCode(kVK_ANSI_E), "f": CGKeyCode(kVK_ANSI_F),
+        "g": CGKeyCode(kVK_ANSI_G), "h": CGKeyCode(kVK_ANSI_H), "i": CGKeyCode(kVK_ANSI_I),
+        "j": CGKeyCode(kVK_ANSI_J), "k": CGKeyCode(kVK_ANSI_K), "l": CGKeyCode(kVK_ANSI_L),
+        "m": CGKeyCode(kVK_ANSI_M), "n": CGKeyCode(kVK_ANSI_N), "o": CGKeyCode(kVK_ANSI_O),
+        "p": CGKeyCode(kVK_ANSI_P), "q": CGKeyCode(kVK_ANSI_Q), "r": CGKeyCode(kVK_ANSI_R),
+        "s": CGKeyCode(kVK_ANSI_S), "t": CGKeyCode(kVK_ANSI_T), "u": CGKeyCode(kVK_ANSI_U),
+        "v": CGKeyCode(kVK_ANSI_V), "w": CGKeyCode(kVK_ANSI_W), "x": CGKeyCode(kVK_ANSI_X),
+        "y": CGKeyCode(kVK_ANSI_Y), "z": CGKeyCode(kVK_ANSI_Z),
+        "0": CGKeyCode(kVK_ANSI_0), "1": CGKeyCode(kVK_ANSI_1), "2": CGKeyCode(kVK_ANSI_2),
+        "3": CGKeyCode(kVK_ANSI_3), "4": CGKeyCode(kVK_ANSI_4), "5": CGKeyCode(kVK_ANSI_5),
+        "6": CGKeyCode(kVK_ANSI_6), "7": CGKeyCode(kVK_ANSI_7), "8": CGKeyCode(kVK_ANSI_8),
+        "9": CGKeyCode(kVK_ANSI_9),
+        "delete": CGKeyCode(kVK_Delete),  // the Backspace-style key above Return
+        "forwarddelete": CGKeyCode(kVK_ForwardDelete),
+        "space": CGKeyCode(kVK_Space),
+        "tab": CGKeyCode(kVK_Tab),
+        "escape": CGKeyCode(kVK_Escape),
+    ]
 
-    init(displayID: CGDirectDisplayID) {
-        self.displayID = displayID
+    static let acceptedDescription = "a-z, 0-9, delete, forwarddelete, space, tab, escape"
+
+    // Case-insensitive; nil for anything not in the table.
+    static func keyCode(forName name: String) -> CGKeyCode? {
+        table[name.lowercased()]
     }
+}
 
-    private func mapToGlobal(_ nx: Float, _ ny: Float) -> CGPoint {
-        let bounds = CGDisplayBounds(displayID)
-        return CGPoint(x: bounds.minX + CGFloat(nx) * (bounds.width - 1),
-                       y: bounds.minY + CGFloat(ny) * (bounds.height - 1))
-    }
+// Where MouseInjector's output goes. The real one posts CGEvents to the HID
+// tap; --selftest swaps in a recorder so the press/release ordering can be
+// checked without sending anything to the (in-use) system.
+protocol EventPoster {
+    func mouse(_ type: CGEventType, at point: CGPoint, clickState: Int64, pressure: Double?)
+    func key(_ code: CGKeyCode, down: Bool)
+}
 
-    private func post(_ type: CGEventType, _ point: CGPoint, clickState: Int64 = 0,
-                      pressure: Double? = nil) {
+struct SystemEventPoster: EventPoster {
+    func mouse(_ type: CGEventType, at point: CGPoint, clickState: Int64, pressure: Double?) {
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: .left) else { return }
         if clickState > 0 {
@@ -103,6 +124,55 @@ final class MouseInjector {
             event.setDoubleValueField(.tabletEventPointPressure, value: pressure)
         }
         event.post(tap: .cghidEventTap)
+    }
+
+    func key(_ code: CGKeyCode, down: Bool) {
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { return }
+        event.post(tap: .cghidEventTap)
+    }
+}
+
+// Maps normalized tablet coordinates onto the captured display and drives the
+// mouse via CGEvent posted to the HID tap (the SendInput equivalent).
+// Single-pointer semantics, like the Windows host's v1 fallback path: the
+// first contact down owns the cursor until it lifts; other pointers are
+// ignored meanwhile. Stylus and eraser ride the same mouse path (the eraser
+// optionally also holds `eraserKey` for the contact — see EraserKey).
+final class MouseInjector {
+    private let displayID: CGDirectDisplayID
+    private let eraserKey: CGKeyCode?  // nil = eraser behaves exactly like stylus
+    private let poster: EventPoster
+    private var ownerPointerId = -1  // -1 = button not down
+    private var heldEraserKey: CGKeyCode?  // key currently down for the owning contact
+    private var lastPoint = CGPoint.zero
+    private var lastUpTime = Date.distantPast
+    private var lastUpPoint = CGPoint.zero
+    private var clickState: Int64 = 1
+
+    init(displayID: CGDirectDisplayID, eraserKey: CGKeyCode? = nil,
+         poster: EventPoster = SystemEventPoster()) {
+        self.displayID = displayID
+        self.eraserKey = eraserKey
+        self.poster = poster
+    }
+
+    private func mapToGlobal(_ nx: Float, _ ny: Float) -> CGPoint {
+        let bounds = CGDisplayBounds(displayID)
+        return CGPoint(x: bounds.minX + CGFloat(nx) * (bounds.width - 1),
+                       y: bounds.minY + CGFloat(ny) * (bounds.height - 1))
+    }
+
+    private func post(_ type: CGEventType, _ point: CGPoint, clickState: Int64 = 0,
+                      pressure: Double? = nil) {
+        poster.mouse(type, at: point, clickState: clickState, pressure: pressure)
+    }
+
+    // Key-up always follows the mouse-up so the app sees the stroke end while
+    // the eraser tool is still selected.
+    private func releaseEraserKey() {
+        guard let code = heldEraserKey else { return }
+        heldEraserKey = nil
+        poster.key(code, down: false)
     }
 
     func handle(_ packet: TouchPacket) {
@@ -124,6 +194,12 @@ final class MouseInjector {
             } else {
                 clickState = 1
             }
+            // Only the contact that owns the pointer presses the key, and only
+            // before its mouse-down so the app switches tool before the stroke.
+            if packet.tool == 2, let eraserKey {
+                heldEraserKey = eraserKey
+                poster.key(eraserKey, down: true)
+            }
             post(.leftMouseDown, point, clickState: clickState, pressure: penPressure)
         case .move:
             if Int(packet.pointerId) == ownerPointerId {
@@ -138,6 +214,7 @@ final class MouseInjector {
             lastUpPoint = point
             post(.leftMouseUp, point, clickState: clickState,
                  pressure: packet.tool != 0 ? 0.0 : nil)
+            releaseEraserKey()
         case .hoverMove:
             if ownerPointerId < 0 {  // S Pen hovering; don't disturb a drag
                 post(.mouseMoved, point)
@@ -147,11 +224,13 @@ final class MouseInjector {
         }
     }
 
-    // The tablet disconnected mid-gesture: don't leave the button stuck down.
+    // The tablet disconnected mid-gesture: don't leave the button (or the
+    // eraser key) stuck down.
     func releaseStuckButton() {
         guard ownerPointerId >= 0 else { return }
         ownerPointerId = -1
         post(.leftMouseUp, lastPoint)
+        releaseEraserKey()
     }
 }
 
@@ -166,10 +245,11 @@ final class TouchBridge {
     private let stopped = AtomicFlag()
     private var currentFd: Int32 = -1
 
-    init(host: String, port: Int, displayID: CGDirectDisplayID, key: SymmetricKey? = nil) {
+    init(host: String, port: Int, displayID: CGDirectDisplayID, key: SymmetricKey? = nil,
+         eraserKey: CGKeyCode? = nil) {
         self.host = host
         self.port = port
-        self.injector = MouseInjector(displayID: displayID)
+        self.injector = MouseInjector(displayID: displayID, eraserKey: eraserKey)
         self.key = key
     }
 

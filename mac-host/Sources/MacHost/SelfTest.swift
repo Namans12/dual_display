@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 // Pure-logic self-tests, runnable anywhere with `--selftest` — the Mac
@@ -92,8 +93,111 @@ func runSelfTests() -> Int32 {
     expect(Discovery.deviceName(fromReply: "EXTDISP?v1") == nil, "query is not a reply")
     expect(Discovery.deviceName(fromReply: "garbage") == nil, "garbage rejected")
 
+    // --eraser-key name table. Expected values are the literal macOS virtual
+    // keycodes (not the kVK_* constants the table is built from) so a typo in
+    // the table can't pass by being compared against itself.
+    expect(EraserKey.keyCode(forName: "a") == 0, "eraser key a = 0x00")
+    expect(EraserKey.keyCode(forName: "e") == 14, "eraser key e = 0x0E")
+    expect(EraserKey.keyCode(forName: "z") == 6, "eraser key z = 0x06")
+    expect(EraserKey.keyCode(forName: "0") == 29, "eraser key 0 = 0x1D")
+    expect(EraserKey.keyCode(forName: "1") == 18, "eraser key 1 = 0x12")
+    expect(EraserKey.keyCode(forName: "9") == 25, "eraser key 9 = 0x19")
+    expect(EraserKey.keyCode(forName: "delete") == 51, "eraser key delete = 0x33")
+    expect(EraserKey.keyCode(forName: "forwarddelete") == 117, "eraser key forwarddelete = 0x75")
+    expect(EraserKey.keyCode(forName: "space") == 49, "eraser key space = 0x31")
+    expect(EraserKey.keyCode(forName: "tab") == 48, "eraser key tab = 0x30")
+    expect(EraserKey.keyCode(forName: "escape") == 53, "eraser key escape = 0x35")
+    expect(EraserKey.keyCode(forName: "E") == EraserKey.keyCode(forName: "e"), "eraser key case-insensitive (E)")
+    expect(EraserKey.keyCode(forName: "Escape") == 53, "eraser key case-insensitive (Escape)")
+    expect(EraserKey.table.count == 41, "eraser key table has 26 letters + 10 digits + 5 named")
+    expect(Set(EraserKey.table.values).count == EraserKey.table.count, "eraser keycodes are distinct")
+    for bad in ["", "ee", "f1", "enter", "return", "shift", " e", "é"] {
+        expect(EraserKey.keyCode(forName: bad) == nil, "eraser key '\(bad)' rejected")
+    }
+    do {
+        _ = try parseOptions(["MacHost", "--eraser-key", "f13"])
+        expect(false, "--eraser-key f13 must throw")
+    } catch MacHostError.invalidArgument(let message) {
+        expect(message.contains("f13") && message.contains("forwarddelete"),
+               "--eraser-key error names the bad value and lists accepted names")
+    } catch {
+        expect(false, "--eraser-key f13 must throw invalidArgument")
+    }
+    expect((try? parseOptions(["MacHost", "--eraser-key", "E"]))?.eraserKey == 14, "--eraser-key E parses to 0x0E")
+    expect((try? parseOptions(["MacHost"]))?.eraserKey == nil, "--eraser-key unset by default")
+    do {
+        _ = try parseOptions(["MacHost", "--eraser-key"])
+        expect(false, "--eraser-key without a value must throw")
+    } catch {}
+
+    // Eraser key press/release ordering, against a recording poster (nothing
+    // is posted to the system).
+    final class Recorder: EventPoster {
+        var log: [String] = []
+        func mouse(_ type: CGEventType, at point: CGPoint, clickState: Int64, pressure: Double?) {
+            switch type {
+            case .leftMouseDown: log.append("mouseDown")
+            case .leftMouseUp: log.append("mouseUp")
+            case .leftMouseDragged: log.append("drag")
+            case .mouseMoved: log.append("move")
+            default: log.append("mouse?")
+            }
+        }
+        func key(_ code: CGKeyCode, down: Bool) { log.append("key\(code)\(down ? "Down" : "Up")") }
+    }
+    func pkt(_ type: TouchPacket.EventType, tool: UInt8, id: UInt8 = 0) -> TouchPacket {
+        TouchPacket(type: type, tool: tool, pointerId: id, pointerCount: 1,
+                    pressure: type == .hoverMove || type == .hoverExit ? 0 : 512,
+                    nx: 0.5, ny: 0.5, timestampUs: 0)
+    }
+    func run(eraserKey: CGKeyCode?, _ body: (MouseInjector) -> Void) -> [String] {
+        let recorder = Recorder()
+        body(MouseInjector(displayID: CGMainDisplayID(), eraserKey: eraserKey, poster: recorder))
+        return recorder.log
+    }
+    let eKey: CGKeyCode = 14
+
+    expect(run(eraserKey: eKey) { i in
+        i.handle(pkt(.down, tool: 2)); i.handle(pkt(.move, tool: 2)); i.handle(pkt(.up, tool: 2))
+    } == ["key14Down", "mouseDown", "drag", "mouseUp", "key14Up"], "eraser: key down, mouse down … mouse up, key up")
+    expect(run(eraserKey: eKey) { i in
+        i.handle(pkt(.down, tool: 2)); i.handle(pkt(.cancel, tool: 2))
+    } == ["key14Down", "mouseDown", "mouseUp", "key14Up"], "eraser cancel releases key after mouse up")
+    expect(run(eraserKey: eKey) { i in
+        i.handle(pkt(.down, tool: 1)); i.handle(pkt(.move, tool: 1)); i.handle(pkt(.up, tool: 1))
+    } == ["mouseDown", "drag", "mouseUp"], "stylus never presses the key")
+    expect(run(eraserKey: eKey) { i in
+        i.handle(pkt(.down, tool: 0)); i.handle(pkt(.up, tool: 0))
+    } == ["mouseDown", "mouseUp"], "finger never presses the key")
+    expect(run(eraserKey: eKey) { i in
+        i.handle(pkt(.hoverMove, tool: 2)); i.handle(pkt(.hoverMove, tool: 2)); i.handle(pkt(.hoverExit, tool: 2))
+    } == ["move", "move"], "eraser hover never presses the key")
+    expect(run(eraserKey: eKey) { i in
+        i.handle(pkt(.down, tool: 2)); i.releaseStuckButton(); i.releaseStuckButton()
+    } == ["key14Down", "mouseDown", "mouseUp", "key14Up"], "disconnect mid-contact releases the key once")
+    expect(run(eraserKey: eKey) { i in
+        i.releaseStuckButton()
+    }.isEmpty, "releaseStuckButton with nothing held posts nothing")
+    expect(run(eraserKey: eKey) { i in
+        i.handle(pkt(.down, tool: 0, id: 0)); i.handle(pkt(.down, tool: 2, id: 1))
+        i.handle(pkt(.up, tool: 2, id: 1)); i.handle(pkt(.up, tool: 0, id: 0))
+    } == ["mouseDown", "mouseUp"], "eraser contact that doesn't own the pointer presses no key")
+    expect(run(eraserKey: eKey) { i in
+        i.handle(pkt(.down, tool: 2, id: 0)); i.handle(pkt(.up, tool: 2, id: 1))
+    } == ["key14Down", "mouseDown"], "up from a non-owner pointer leaves the key held")
+    expect(run(eraserKey: eKey) { i in
+        i.handle(pkt(.down, tool: 2)); i.handle(pkt(.up, tool: 2))
+        i.handle(pkt(.down, tool: 1)); i.handle(pkt(.up, tool: 1))
+        i.handle(pkt(.down, tool: 2)); i.handle(pkt(.up, tool: 2))
+    } == ["key14Down", "mouseDown", "mouseUp", "key14Up", "mouseDown", "mouseUp",
+          "key14Down", "mouseDown", "mouseUp", "key14Up"], "key state resets between contacts")
+    expect(run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 2)); i.handle(pkt(.move, tool: 2)); i.handle(pkt(.up, tool: 2))
+        i.handle(pkt(.down, tool: 2)); i.releaseStuckButton()
+    } == ["mouseDown", "drag", "mouseUp", "mouseDown", "mouseUp"], "without --eraser-key the eraser acts like stylus")
+
     if failures == 0 {
-        print("selftest: OK (touch v2 parse, audio wire format, UDP fragmentation, discovery reply parse)")
+        print("selftest: OK (touch v2 parse, audio wire format, UDP fragmentation, discovery reply parse, eraser key)")
         return 0
     }
     print("selftest: \(failures) failure(s)")

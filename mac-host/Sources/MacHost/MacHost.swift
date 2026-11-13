@@ -27,6 +27,7 @@ struct Options {
     var muteLocal = false
     var audioDelayMs = 40
     var udp = false
+    var eraserKey: CGKeyCode?  // nil = eraser acts like stylus
 }
 
 enum MacHostError: Error, CustomStringConvertible {
@@ -66,6 +67,7 @@ func printUsage() {
       MacHost [--wifi | --host <ip>] [--port 5000] [--fps 60]
               [--width N --height N] [--bitrate 25000000]
               [--display N] [--hevc] [--udp] [--no-touch]
+              [--eraser-key <name>]
               [--audio [--mute-local] [--audio-delay-ms 40]]
 
     --wifi discovers the tablet on the LAN (UDP broadcast) so no IP is needed;
@@ -86,6 +88,9 @@ func printUsage() {
     Touch: tablet touches and S Pen drive the Mac cursor (down/drag/up, taps
     click, double taps double-click; hover moves the pointer). Needs the
     Accessibility permission. Disable with --no-touch.
+    --eraser-key <name> holds that key while the S Pen eraser end touches
+    (macOS can't inject a real eraser; many drawing apps bind a key to it).
+    Names: \(EraserKey.acceptedDescription) (US-layout positions).
 
     USB-C with ADB:
       adb forward tcp:5000 tcp:5000
@@ -153,6 +158,13 @@ func parseOptions(_ args: [String]) throws -> Options {
             options.removeDisplay = true
         case "--no-touch":
             options.noTouch = true
+        case "--eraser-key":
+            let name = try requireValue(arg)
+            guard let code = EraserKey.keyCode(forName: name) else {
+                throw MacHostError.invalidArgument(
+                    "Unknown --eraser-key '\(name)'. Accepted: \(EraserKey.acceptedDescription)")
+            }
+            options.eraserKey = code
         case "--selftest":
             options.selfTest = true
         case "--crypto-selftest":
@@ -836,7 +848,8 @@ struct MacHostMain {
                 let port = touchPort(forHost: options.host, videoPort: options.port)
                 touchBridge = TouchBridge(host: options.host, port: port,
                                           displayID: selection.display.displayID,
-                                          key: pairKey)
+                                          key: pairKey,
+                                          eraserKey: options.eraserKey)
                 touchBridge?.start()
             }
 
