@@ -4,10 +4,18 @@
 #   ./build-dmg.sh [path-to-ExtendedDisplayReceiver.apk]
 #
 # Produces dist/ExtendedDisplay.dmg containing ExtendedDisplay.app:
-#   - MacHost (ScreenCaptureKit + VideoToolbox sender)
-#   - a launcher that automates adb (install app, forward port, start activity)
+#   - ExtendedDisplay (the native settings/launcher window; Contents/MacOS/ExtendedDisplay)
+#     which automates adb (install app, forward ports, start activity) and runs...
+#   - MacHost (ScreenCaptureKit + VideoToolbox sender), as a child process
 #   - the Android receiver APK + darwin platform-tools (downloaded)
 set -euo pipefail
+
+# Receiver APK versionCode this host needs (v9: the touch server re-accepts a
+# reconnecting host immediately). Single source of truth: written into
+# Info.plist as EDRequiredAppVersion, which the launcher reads at run time to
+# decide whether to install/upgrade the bundled APK on the tablet.
+REQUIRED_APP_VERSION=9
+APP_VERSION="0.9.0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -33,12 +41,15 @@ fi
 # relative APK argument at the copy step.
 APK="$(cd "$(dirname "$APK")" && pwd)/$(basename "$APK")"
 
-# 2. Build MacHost
-echo "Building MacHost (release)..."
+# 2. Build MacHost and the launcher GUI (one SwiftPM package, two products)
+echo "Building MacHost + launcher (release)..."
 cd "$REPO_ROOT/mac-host"
 swift build -c release
-MACHOST_BIN="$(swift build -c release --show-bin-path)/MacHost"
+BIN_DIR="$(swift build -c release --show-bin-path)"
+MACHOST_BIN="$BIN_DIR/MacHost"
+GUI_BIN="$BIN_DIR/ExtendedDisplayApp"
 [[ -x "$MACHOST_BIN" ]] || { echo "error: MacHost binary missing" >&2; exit 1; }
+[[ -x "$GUI_BIN" ]] || { echo "error: ExtendedDisplayApp binary missing" >&2; exit 1; }
 
 # 3. darwin platform-tools (adb)
 PT_CACHE="$SCRIPT_DIR/.cache/platform-tools"
@@ -56,76 +67,48 @@ echo "Assembling $APP_NAME.app..."
 rm -rf "$STAGING"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
+cp "$GUI_BIN" "$APP/Contents/MacOS/ExtendedDisplay"
 cp "$MACHOST_BIN" "$APP/Contents/MacOS/MacHost"
 cp "$APK" "$APP/Contents/Resources/ExtendedDisplayReceiver.apk"
 cp -R "$PT_CACHE" "$APP/Contents/Resources/platform-tools"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# Unquoted heredoc on purpose: only $APP_VERSION / $REQUIRED_APP_VERSION expand.
+#  - NSPrincipalClass / NSHighResolutionCapable: a normal windowed AppKit app.
+#  - NSSupportsSuddenTermination / AutomaticTermination off: macOS must not kill
+#    the app without letting it stop MacHost first (no orphaned virtual display).
+#  - NSLocalNetworkUsageDescription: the text of macOS 15's Local Network prompt,
+#    which MacHost's Wi-Fi connections trigger (attributed to this app).
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleIdentifier</key><string>com.heysnap.extdisplay.host</string>
     <key>CFBundleName</key><string>Extended Display</string>
+    <key>CFBundleDisplayName</key><string>Extended Display</string>
     <key>CFBundleExecutable</key><string>ExtendedDisplay</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.9.0</string>
+    <key>CFBundleShortVersionString</key><string>$APP_VERSION</string>
+    <key>CFBundleVersion</key><string>$APP_VERSION</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSSupportsSuddenTermination</key><false/>
+    <key>NSSupportsAutomaticTermination</key><false/>
+    <key>NSLocalNetworkUsageDescription</key><string>Extended Display connects to the tablet on your local network.</string>
+    <key>EDRequiredAppVersion</key><integer>$REQUIRED_APP_VERSION</integer>
 </dict>
 </plist>
 PLIST
+plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-# Launcher: adb plumbing, then MacHost. Logs to ~/Library/Logs since Finder
-# launches have no terminal.
-cat > "$APP/Contents/MacOS/ExtendedDisplay" <<'LAUNCHER'
-#!/bin/bash
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RES="$DIR/../Resources"
-LOG="$HOME/Library/Logs/ExtendedDisplay.log"
-exec >> "$LOG" 2>&1
-echo "=== Extended Display launch $(date) ==="
-
-ADB="$RES/platform-tools/adb"
-command -v adb >/dev/null 2>&1 && ADB="$(command -v adb)"
-
-echo "Waiting for tablet over USB (enable USB debugging)..."
-until [[ "$("$ADB" get-state 2>/dev/null)" == "device" ]]; do sleep 2; done
-
-# Install the receiver if missing, or update it when older than the version
-# this host needs (v9: touch server re-accepts a reconnecting host immediately).
-REQUIRED_APP_VERSION=9
-INSTALLED=$("$ADB" shell dumpsys package com.heysnap.extdisplay 2>/dev/null \
-    | sed -n 's/.*versionCode=\([0-9]*\).*/\1/p' | head -1)
-if [[ -z "$INSTALLED" || "$INSTALLED" -lt "$REQUIRED_APP_VERSION" ]]; then
-    echo "Installing receiver app (installed: ${INSTALLED:-none})..."
-    "$ADB" install -r "$RES/ExtendedDisplayReceiver.apk"
-fi
-"$ADB" forward tcp:5000 tcp:5000
-"$ADB" forward tcp:5001 tcp:5001    # touch uplink (tablet -> Mac input)
-"$ADB" forward tcp:5003 tcp:5003    # desktop audio (only used with --audio)
-"$ADB" shell am start -n com.heysnap.extdisplay/.MainActivity
-sleep 1.5
-
-# Settings without a GUI (parity with the Windows GUI's persisted state):
-#   pairing.code — the 8-char pairing code; exported as EXTDISPLAY_KEY so the
-#                  stream is encrypted (never passed on the command line).
-#   options      — extra MacHost arguments, e.g.: --audio --mute-local --fps 120
-CFG="$HOME/Library/Application Support/ExtendedDisplay"
-if [[ -s "$CFG/pairing.code" ]]; then
-    EXTDISPLAY_KEY="$(head -1 "$CFG/pairing.code" | tr -d '[:space:]')"
-    export EXTDISPLAY_KEY
-    echo "Pairing code loaded from pairing.code — link will be encrypted."
-fi
-EXTRA_ARGS=()
-if [[ -s "$CFG/options" ]]; then
-    # shellcheck disable=SC2207
-    EXTRA_ARGS=($(head -1 "$CFG/options"))
-    echo "Extra options: ${EXTRA_ARGS[*]}"
-fi
-
-exec "$DIR/MacHost" --host 127.0.0.1 --port 5000 "${EXTRA_ARGS[@]}"
-LAUNCHER
 chmod +x "$APP/Contents/MacOS/ExtendedDisplay" "$APP/Contents/MacOS/MacHost"
+
+# Fail the build here, not on a user's Mac, if the launcher's own logic is broken
+# (argument mapping, pairing file, status parsing; touches no tablet and no stream).
+"$APP/Contents/MacOS/ExtendedDisplay" --selftest
 
 # Ad-hoc sign so Gatekeeper treats the bundle consistently (right-click > Open on first run).
 codesign --force --deep -s - "$APP"
