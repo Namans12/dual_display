@@ -10,10 +10,20 @@ struct HostStatus: Equatable {
     var line: StatusLine
     // A second, smaller line for things the user can act on (permissions).
     var hint: String?
+    // Deep link to the System Settings privacy pane that fixes this status, if any.
+    var settingsPane: String? = nil
 
-    static func make(_ kind: StatusLine.Kind, _ text: String, hint: String? = nil) -> HostStatus {
-        HostStatus(line: StatusLine(kind: kind, text: text), hint: hint)
+    static func make(_ kind: StatusLine.Kind, _ text: String, hint: String? = nil,
+                     settingsPane: String? = nil) -> HostStatus {
+        HostStatus(line: StatusLine(kind: kind, text: text), hint: hint, settingsPane: settingsPane)
     }
+}
+
+enum PrivacyPane {
+    private static let base = "x-apple.systempreferences:com.apple.preference.security?"
+    static let screenRecording = base + "Privacy_ScreenCapture"
+    static let accessibility = base + "Privacy_Accessibility"
+    static let localNetwork = base + "Privacy_LocalNetwork"
 }
 
 // Turns MacHost's stdout/stderr into the one-line live status. The strings
@@ -105,6 +115,7 @@ struct HostStatusParser {
         if let f = fatal { return HostStatusParser.describeError(f) }
 
         var hint: String?
+        var pane: String?
         if pairingMismatch {
             return HostStatus(line: StatusLine(kind: .error, text: "The tablet has a different pairing code."),
                               hint: "Type the pairing code shown above into the code box at the top of the tablet's screen.")
@@ -113,9 +124,11 @@ struct HostStatusParser {
             hint = "Touch was rejected: the pairing code on the tablet doesn't match."
         } else if phase == .unreachable && noRoute {
             hint = "Allow Extended Display under System Settings > Privacy & Security > Local Network."
+            pane = PrivacyPane.localNetwork
         } else if accessibilityMissing {
             hint = "Touch needs Accessibility: enable Extended Display under System Settings > " +
                    "Privacy & Security > Accessibility, then Stop and Start again."
+            pane = PrivacyPane.accessibility
         } else if udpDropping && phase == .streaming {
             hint = "The network is dropping frames. Try turning off Low-latency UDP."
         }
@@ -148,7 +161,7 @@ struct HostStatusParser {
         case .stopping:
             line = StatusLine(kind: .working, text: "Stopping…")
         }
-        return HostStatus(line: line, hint: hint)
+        return HostStatus(line: line, hint: hint, settingsPane: pane)
     }
 
     // Screen Recording is the one failure users hit routinely; ScreenCaptureKit's
@@ -157,7 +170,8 @@ struct HostStatusParser {
         if message.contains("TCC") || message.contains("-3801") {
             return .make(.error, "Screen Recording permission is missing.",
                          hint: "Enable Extended Display under System Settings > Privacy & Security > " +
-                               "Screen & System Audio Recording, then Start again.")
+                               "Screen & System Audio Recording, then Start again.",
+                         settingsPane: PrivacyPane.screenRecording)
         }
         return .make(.error, "Error: \(message)")
     }

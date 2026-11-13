@@ -8,7 +8,7 @@ enum Help {
     static let udp = "Send video over UDP for lower latency on Wi-Fi. Helps on lossy links; on a good 5 GHz link plain TCP is usually smoother. Not available over USB."
     static let best = "Sharpest picture: native 2960x1848 at 60 fps with a higher 40 Mbps bitrate. Best for reading and coding. Prefers USB or strong 5 GHz Wi-Fi."
     static let balanced = "Native 2960x1848 at 60 fps, 25 Mbps. The proven default, right for almost everything."
-    static let smooth = "Silkiest cursor and scrolling: 120 fps with the virtual display at 1920x1200 (the tablet upscales)."
+    static let fast = "Quickest reaction to touch and pen: the picture is sent at 1920x1200 and the tablet enlarges it, which roughly halves the encoding time. Text looks softer than Balanced."
     static let touch = "Tablet touches and the S Pen control the Mac cursor: tap = click, drag = move. Needs the Accessibility permission."
     static let hevc = "H.265: better compression, so motion looks cleaner at the same bitrate. Barely visible on a still desktop. Needs tablet HEVC decode."
     static let audio = "Play the Mac's sound on the tablet over the same link. Covered by the Screen Recording permission."
@@ -114,8 +114,8 @@ struct ContentView: View {
             RadioRow(title: "Balanced  (recommended)", help: Help.balanced, selected: model.settings.quality == .balanced) {
                 model.settings.quality = .balanced
             }
-            RadioRow(title: "Smooth motion  (120 fps)", help: Help.smooth, selected: model.settings.quality == .smooth) {
-                model.settings.quality = .smooth
+            RadioRow(title: "Fastest response  (softer picture)", help: Help.fast, selected: model.settings.quality == .fast) {
+                model.settings.quality = .fast
             }
         }
     }
@@ -173,6 +173,12 @@ struct ContentView: View {
                     .lineLimit(2)
                     .textSelection(.enabled)
                 Spacer(minLength: 0)
+                // Permission problems can only be fixed in System Settings, so
+                // take the user straight to the right pane.
+                if let pane = model.status.settingsPane, let url = URL(string: pane) {
+                    Button("Open Settings") { NSWorkspace.shared.open(url) }
+                        .controlSize(.small)
+                }
             }
             Text(model.status.hint ?? " ")
                 .font(.caption)

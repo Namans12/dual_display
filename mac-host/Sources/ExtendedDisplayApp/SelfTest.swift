@@ -19,8 +19,9 @@ func runSelfTests() -> Int32 {
 
     s.quality = .best
     expect(args(s) == ["--host", "127.0.0.1", "--port", "5000", "--bitrate", "40000000"], "best = 40 Mbps in bits/s")
-    s.quality = .smooth
-    expect(args(s) == ["--host", "127.0.0.1", "--port", "5000", "--fps", "120"], "smooth = --fps 120")
+    s.quality = .fast
+    expect(args(s) == ["--host", "127.0.0.1", "--port", "5000", "--width", "1920", "--height", "1200"], "fastest response = 1920x1200 capture")
+    expect(QualityPreset(rawValue: "smooth") == .fast, "a saved 'smooth' choice maps to fastest response")
     s.quality = .balanced
 
     s.touch = false; s.hevc = true
@@ -123,7 +124,7 @@ func runSelfTests() -> Int32 {
     expect(ss.load(encryptDefault: false).encrypt == false, "first launch without a code → encrypt off")
     var custom = LauncherSettings()
     custom.connection = .wifi; custom.tabletIP = "10.0.0.7"; custom.lowLatencyUDP = true
-    custom.quality = .smooth; custom.touch = false; custom.hevc = true
+    custom.quality = .fast; custom.touch = false; custom.hevc = true
     custom.audio = true; custom.muteLocal = true; custom.audioDelayMs = 75; custom.encrypt = true
     ss.save(custom)
     expect(ss.load(encryptDefault: false) == custom, "settings round-trip")

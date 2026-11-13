@@ -9,7 +9,9 @@ enum ConnectionMode: String, CaseIterable {
 }
 
 enum QualityPreset: String, CaseIterable {
-    case best, balanced, smooth
+    // "smooth" is the stored value of the old "Smooth motion (120 fps)" preset,
+    // which this one replaced; keeping it lets a saved choice carry over.
+    case best, balanced, fast = "smooth"
 }
 
 struct LauncherSettings: Equatable {

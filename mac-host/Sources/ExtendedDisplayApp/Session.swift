@@ -203,6 +203,12 @@ final class LaunchSession {
                             hint: r.output.trimmingCharacters(in: .whitespacesAndNewlines))
             }
         }
+        // Restart the receiver rather than just raising it: receivers up to v9
+        // choose their decoder once and keep it, so after switching H.264 <->
+        // HEVC here the tablet showed no picture until the app was restarted
+        // (measured). The saved pairing key survives a force-stop.
+        _ = runCommand(adb, ["shell", "am", "force-stop", Self.receiverPackage], timeout: 20, cancel: cancel)
+        if cancel.isSet { return .stopped }
         let start = runCommand(adb, ["shell", "am", "start", "-n", Self.receiverActivity], timeout: 20, cancel: cancel)
         if cancel.isSet { return .stopped }
         if start.status != 0 { log.note("am start: \(start.output)") }

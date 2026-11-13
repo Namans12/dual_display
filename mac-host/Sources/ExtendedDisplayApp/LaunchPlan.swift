@@ -15,7 +15,13 @@ enum Ports {
 enum Quality {
     // MacHost's --bitrate is bits/second (the Windows sender takes kbps).
     static let bestBitrate = 40_000_000
-    static let smoothFps = 120
+    // "Fastest response": the capture is scaled to 1920x1200 (the tablet
+    // upscales). Measured on an M4 over USB against Balanced: encode 7.6 ms vs
+    // 14.5 ms per frame, a touch reaching the wire in 16 ms vs 24 ms, text at
+    // ~72% of the sharpness. It replaced a 120 fps preset that only ever
+    // delivered 60 real frames/s on a 60 Hz Mac.
+    static let fastWidth = 1920
+    static let fastHeight = 1200
 }
 
 // Hostnames and IPv4/IPv6 literals only. Nothing that could be mistaken for a
@@ -57,7 +63,7 @@ func hostArguments(for s: LauncherSettings, extra: [String] = []) -> [String] {
     switch s.quality {
     case .best: a += ["--bitrate", String(Quality.bestBitrate)]
     case .balanced: break  // MacHost's defaults (60 fps, 25 Mbps)
-    case .smooth: a += ["--fps", String(Quality.smoothFps)]
+    case .fast: a += ["--width", String(Quality.fastWidth), "--height", String(Quality.fastHeight)]
     }
     if !s.touch { a.append("--no-touch") }
     if s.hevc { a.append("--hevc") }
