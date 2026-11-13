@@ -72,6 +72,17 @@ func runSelfTests() -> Int32 {
     s.connection = .wifi; s.tabletIP = ""
     expect(settingsProblem(s) == nil, "blank IP is fine")
 
+    // ---- uninstall clean-up ----
+    let leftovers = Uninstaller.leftovers(bundleID: "com.heysnap.extdisplay.host")
+    expect(leftovers.contains("Library/Application Support/ExtendedDisplay"), "uninstall removes the support folder (pairing code)")
+    expect(leftovers.contains("Library/Logs/ExtendedDisplay.log"), "uninstall removes the log")
+    expect(leftovers.allSatisfy { $0.hasPrefix("Library/") && !$0.contains("..") && $0.count > "Library/".count },
+           "uninstall paths stay inside ~/Library and are never a bare folder")
+    expect(Uninstaller.isSafeBundleID("com.heysnap.extdisplay.host"), "normal bundle id accepted")
+    expect(!Uninstaller.isSafeBundleID("x'; rm -rf ~; '") && !Uninstaller.isSafeBundleID("") &&
+           !Uninstaller.isSafeBundleID("../..") && !Uninstaller.isSafeBundleID("a/b"),
+           "unsafe bundle ids are rejected")
+
     // ---- pairing code generation ----
     var seen = Set<String>()
     var alphabetOK = true

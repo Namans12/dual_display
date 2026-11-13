@@ -23,6 +23,12 @@ final class AppModel: ObservableObject {
         }
     }
     @Published var confirmingNewCode = false
+    @Published var confirmingUninstall = false
+    @Published private(set) var permissions = Permissions.current()
+    // Set once the user has gone through the Screen Recording prompt: macOS
+    // only applies that grant to a fresh process, so we offer to reopen.
+    @Published private(set) var askedForScreenRecording = false
+    private var permissionTimer: Timer?
     @Published private(set) var pairingCode: String?
     @Published private(set) var state: RunState = .idle
     @Published private(set) var status = HostStatus.make(.idle, "Ready.")
@@ -52,6 +58,45 @@ final class AppModel: ObservableObject {
     }
 
     var isIdle: Bool { state == .idle }
+
+    // The window polls while it is up: Accessibility flips live when the user
+    // toggles it in System Settings, and this is how the checklist notices.
+    func startWatchingPermissions() {
+        permissionTimer?.invalidate()
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
+            MainActor.assumeIsolated { AppModel.shared.refreshPermissions() }
+        }
+        refreshPermissions()
+    }
+
+    func refreshPermissions() {
+        let now = Permissions.current()
+        if now != permissions { permissions = now }
+    }
+
+    func grantScreenRecording() {
+        Permissions.requestScreenRecording()
+        askedForScreenRecording = true
+        refreshPermissions()
+    }
+
+    func grantAccessibility() {
+        Permissions.requestAccessibility()
+        refreshPermissions()
+    }
+
+    func reopenApp() {
+        shutdown { Permissions.relaunch() }
+    }
+
+    // Stops any stream first so no MacHost (and no virtual display) is left behind.
+    func uninstall() {
+        shutdown {
+            if let problem = Uninstaller.run() {
+                AppModel.shared.status = .make(.error, problem)
+            }
+        }
+    }
 
     // Reuses the saved code; only creates one when there is none.
     private func loadPairingCode() {

@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Running straight from .build/ (no bundle) would otherwise start in the background.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        AppModel.shared.startWatchingPermissions()
 
         // A `kill`/logout of the launcher must also take MacHost down cleanly.
         for sig in [SIGTERM, SIGHUP] {
@@ -44,6 +45,11 @@ struct LauncherApp: App {
             ContentView(model: AppModel.shared)
         }
         .windowResizability(.contentSize)
-        .commands { CommandGroup(replacing: .newItem) {} }  // single window: no File > New
+        .commands {
+            CommandGroup(replacing: .newItem) {}  // single window: no File > New
+            CommandGroup(after: .appInfo) {
+                Button("Uninstall Extended Display…") { AppModel.shared.confirmingUninstall = true }
+            }
+        }
     }
 }

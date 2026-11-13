@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased — 2026-11-13
+## v0.10.0 — 2026-11-13 (Mac package; receiver v10 pending a Windows build)
+
+- **Installable Mac app.** Signed with one self-signed certificate so privacy
+  grants survive updates and each System Settings list has a single entry
+  (ad-hoc builds left a dead, still-"on" entry after every rebuild). First-run
+  **Permissions needed** checklist (Grant… / Settings / Reopen app), an
+  **Uninstall…** that also removes privacy entries, settings, pairing code and
+  log, an app icon, a versioned DMG, and no stray second copy of the app.
 
 Mac host, verified on macOS 27 (M4) against receiver v9 on a Galaxy Tab S9 Ultra.
 

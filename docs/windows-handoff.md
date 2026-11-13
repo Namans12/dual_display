@@ -85,7 +85,7 @@ what you could not verify, the commits you pushed, and where the APK is.
 ## After Windows is done (back on the Mac)
 
 1. `git pull` on the `mac` branch.
-2. Copy `app-release.apk` over and rebuild the app: `./installers/mac/build-dmg.sh /path/to/app-release.apk`, then
-   replace `/Applications/ExtendedDisplay.app` with `installers/mac/staging/ExtendedDisplay.app`. A rebuilt app is
-   re-signed, so macOS asks for Screen Recording and Accessibility again.
+2. Copy `app-release.apk` over and rebuild the package:
+   `EXTDISPLAY_INSTALL=1 ./installers/mac/build-dmg.sh /path/to/app-release.apk`. It is signed with the same
+   certificate as before, so the permissions already granted keep working.
 3. Start once over USB: the app installs v10 on the tablet if it is still on v9.

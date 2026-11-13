@@ -57,23 +57,44 @@ ignored — it tucks away on its own once video starts.
   keeps retrying every 2 s, so granting it mid-run recovers on its own. USB
   (127.0.0.1) is exempt.
 
-## Quick start — packaged (.dmg, USB automated)
+## Quick start — packaged (.dmg)
 
-On a Mac, from the repo root:
+Download `ExtendedDisplay-<version>.dmg` from the repository's Releases page (or build it, below), open it, and
+drag **Extended Display** to **Applications**.
+
+1. **First open:** right-click the app → **Open** (it is signed with a self-signed certificate, not an Apple
+   Developer ID, so macOS warns once; on recent macOS you may instead need System Settings → Privacy & Security →
+   **Open Anyway**).
+2. **Permissions:** the window shows a **Permissions needed** list until both are granted. Press **Grant…** next to
+   *Screen Recording* and switch the app on in the list macOS opens, then press **Reopen app** (macOS only applies
+   that permission to a freshly opened app). Press **Grant…** next to *Accessibility* and switch it on (needed for
+   touch and pen). Over Wi-Fi, macOS also asks once for *Local Network* on the first Start.
+3. **Start Streaming.** Over USB the app waits for the tablet, installs or upgrades the receiver app if needed and
+   opens it; over Wi-Fi open the receiver app on the tablet first.
+
+**Uninstall:** use **Uninstall…** at the bottom of the window (or the app menu). It stops streaming, moves the app to
+the Trash and removes its privacy entries, settings, pairing code and log. Dragging the app to the Trash by hand
+leaves all of those behind — macOS does not clean up after a deleted app.
+
+**Why the app is signed the way it is.** macOS matches a privacy grant against the app's signature. An unsigned
+("ad-hoc") build is a different app to macOS after every rebuild: the old grant stops working but stays in the list,
+still switched on, and each build adds confusion. Every release is therefore signed with the same self-signed
+certificate (`installers/mac/make-signing-cert.sh` creates it once, in the login keychain), so a grant survives
+updates and each list has one entry. **Grant…** also clears a stale entry of its own before asking, which recovers
+from builds made before this.
+
+### Building the DMG
 
 ```bash
-./installers/mac/build-dmg.sh          # optionally: path to the receiver APK
+./installers/mac/make-signing-cert.sh              # once per build machine
+./installers/mac/build-dmg.sh path/to/receiver.apk # -> installers/mac/dist/ExtendedDisplay-<version>.dmg
 ```
 
-This builds `MacHost` and the launcher window (release), bundles them with the
-receiver APK and darwin platform-tools into `ExtendedDisplay.app`, runs the
-launcher's `--selftest`, ad-hoc signs the bundle, and emits
-`installers/mac/dist/ExtendedDisplay.dmg`.
-
-First run: right-click → **Open** (ad-hoc signature), then grant Screen
-Recording, Accessibility (touch) and — for Wi-Fi — Local Network to
-**Extended Display** under System Settings → Privacy & Security. A rebuilt
-(re-signed) app may need those grants again.
+`build-dmg.sh` builds MacHost and the launcher window (release), bundles them with the receiver APK, darwin
+platform-tools and the app icon, runs the launcher's `--selftest`, signs the bundle and writes the DMG. It leaves no
+second copy of the app on disk (a stray copy shows up twice in Launchpad and in the privacy panes' "+" picker).
+`EXTDISPLAY_INSTALL=1` also installs the result into /Applications. Without the certificate it falls back to ad-hoc
+signing and says so. To keep releasing updates that inherit users' grants, keep that certificate's private key.
 
 The window offers **Connection** (USB, or Wi-Fi with an optional tablet IP and
 Low-latency UDP), **Quality** (Best resolution / Balanced / Fastest response),
@@ -95,10 +116,11 @@ with text at about 72% of Balanced's sharpness.
 On USB, Start restarts the tablet app: receivers up to v9 keep the decoder of their first stream, so switching
 H.264 ↔ HEVC otherwise gave no picture (fixed in the receiver source for v10).
 
-> Status (2026-11-13, macOS 27): pressing **Start** was exercised on device — the app found the tablet, set up
-> USB, launched MacHost and correctly reported the missing Screen Recording permission with an **Open Settings**
-> button. A full stream through the app (after granting its permissions), Stop and quit with a live stream are
-> not verified yet; the manual commands below are the fully verified path.
+> Status (2026-11-13, macOS 27). Verified by running: the app builds, signs with the certificate and passes its
+> self-tests; Start finds the tablet, sets up USB, launches MacHost and reports a missing Screen Recording
+> permission clearly; **Uninstall…** on a copy removed the app, settings, pairing code, log and saved window state.
+> Not verified yet: a full stream through the app after granting its permissions, Stop/quit with a live stream,
+> and that the privacy entries disappear from System Settings after Uninstall (only visible on screen).
 
 ## Quick start — manual build / run
 

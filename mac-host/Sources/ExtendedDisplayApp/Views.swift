@@ -39,6 +39,33 @@ struct RadioRow: View {
     }
 }
 
+struct PermissionRow: View {
+    let title: String
+    let detail: String
+    let granted: Bool
+    let grant: () -> Void
+    let pane: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .foregroundColor(granted ? .green : .orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                Text(detail).font(.caption).foregroundColor(.secondary)
+            }
+            Spacer(minLength: 0)
+            if !granted {
+                // Grant shows the system prompt (and adds the app to the list);
+                // Settings jumps to the list for when the prompt was dismissed.
+                Button("Grant…", action: grant).controlSize(.small)
+                Button("Settings") { Permissions.openPane(pane) }.controlSize(.small)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct Section<Content: View>: View {
     let title: String
     @ViewBuilder var content: Content
@@ -60,6 +87,8 @@ struct ContentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if !model.permissions.allGranted { permissionsSection }
+
             // Settings are read when Start is pressed, so lock them while running
             // rather than let the user change controls that have no effect.
             Group {
@@ -72,11 +101,57 @@ struct ContentView: View {
             pairing
             statusArea
             buttons
+            footer
         }
         .padding(16)
         .frame(width: 440)
         .fixedSize(horizontal: false, vertical: true)
         .background(WindowConfigurator())
+    }
+
+    // Shown only while something is missing, so a set-up app has no clutter.
+    private var permissionsSection: some View {
+        Section(title: "Permissions needed") {
+            PermissionRow(title: "Screen Recording",
+                          detail: "to show the Mac's extended desktop on the tablet",
+                          granted: model.permissions.screenRecording,
+                          grant: { model.grantScreenRecording() },
+                          pane: PrivacyPane.screenRecording)
+            if model.askedForScreenRecording && !model.permissions.screenRecording {
+                HStack(spacing: 8) {
+                    Text("Switched it on? macOS applies it after the app is reopened.")
+                        .font(.caption).foregroundColor(.secondary)
+                    Spacer(minLength: 0)
+                    Button("Reopen app") { model.reopenApp() }.controlSize(.small)
+                }
+                .padding(.leading, 24)
+            }
+            PermissionRow(title: "Accessibility",
+                          detail: "so touch and pen on the tablet control the Mac",
+                          granted: model.permissions.accessibility,
+                          grant: { model.grantAccessibility() },
+                          pane: PrivacyPane.accessibility)
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev")")
+                .font(.caption).foregroundColor(.secondary)
+            Spacer()
+            Button("Uninstall…") { model.confirmingUninstall = true }
+                .buttonStyle(.link)
+                .font(.caption)
+                .help("Remove the app together with its permissions, settings, pairing code and log.")
+        }
+        .alert("Uninstall Extended Display?", isPresented: $model.confirmingUninstall) {
+            Button("Uninstall", role: .destructive) { model.uninstall() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This stops streaming, moves the app to the Trash and removes its permissions " +
+                 "(Screen Recording, Accessibility, Local Network), settings, pairing code and log. " +
+                 "The app on the tablet is not removed.")
+        }
     }
 
     private var connection: some View {
