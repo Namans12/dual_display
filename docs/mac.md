@@ -113,6 +113,10 @@ Quality presets: **Best resolution** adds `--bitrate 40000000`; **Balanced** is 
 measured over USB it halves the encode time (7.6 vs 14.5 ms) and puts a touch on the wire in 16 ms instead of 24,
 with text at about 72% of Balanced's sharpness.
 
+MacHost runs as a background process, so it has no Dock icon of its own (it used to appear as a second, bouncing
+"Extended Display" icon while streaming). On USB, Stop closes the tablet app so no frozen picture is left on it; over
+Wi-Fi the tablet app stays open to be found again, and from receiver v10 it blanks its own screen when the stream ends.
+
 On USB, Start restarts the tablet app: receivers up to v9 keep the decoder of their first stream, so switching
 H.264 ↔ HEVC otherwise gave no picture (fixed in the receiver source for v10).
 
@@ -253,6 +257,23 @@ Colour was checked with 16 sRGB patches drawn on the virtual display and read
 back from a tablet screenshot: every patch matched within 1/255. If the tablet
 still looks more saturated than the Mac, that is the tablet's own display mode
 (Samsung: Settings → Display → Screen mode → **Natural** instead of Vivid).
+
+## Touch gestures
+
+macOS has no public way to inject real multi-touch, so the host translates gestures into mouse input:
+
+| On the tablet | On the Mac |
+|---|---|
+| One-finger tap (twice quickly) | Click (double-click) |
+| One finger, press and move — or rest ~0.15 s, then move | Drag: select text, move windows |
+| Two fingers moving | Scroll the window under the fingers, 1:1 with the fingers |
+| Two-finger tap | Right-click |
+| S Pen | Presses and drags at once, with pressure; hovering moves the pointer |
+
+A finger's press is not sent the instant it lands: until it moves, lifts or has rested briefly, a second finger can
+still turn the gesture into a scroll. (Before this, every touch was an immediate press-and-drag, so there was no way
+to scroll.) The gesture logic is covered by `MacHost --selftest`; scrolling with real fingers on the tablet is the one
+part that was not exercised when this was written.
 
 ## S Pen eraser key (`--eraser-key`)
 

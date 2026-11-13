@@ -140,20 +140,32 @@ func runSelfTests() -> Int32 {
             case .leftMouseUp: log.append("mouseUp")
             case .leftMouseDragged: log.append("drag")
             case .mouseMoved: log.append("move")
+            case .rightMouseDown: log.append("rightDown")
+            case .rightMouseUp: log.append("rightUp")
             default: log.append("mouse?")
             }
         }
         func key(_ code: CGKeyCode, down: Bool) { log.append("key\(code)\(down ? "Down" : "Up")") }
+        func scroll(dx: Int32, dy: Int32) { log.append("scroll(\(dx),\(dy))") }
     }
-    func pkt(_ type: TouchPacket.EventType, tool: UInt8, id: UInt8 = 0) -> TouchPacket {
+    func pkt(_ type: TouchPacket.EventType, tool: UInt8, id: UInt8 = 0,
+             nx: Float = 0.5, ny: Float = 0.5) -> TouchPacket {
         TouchPacket(type: type, tool: tool, pointerId: id, pointerCount: 1,
                     pressure: type == .hoverMove || type == .hoverExit ? 0 : 512,
-                    nx: 0.5, ny: 0.5, timestampUs: 0)
+                    nx: nx, ny: ny, timestampUs: 0)
+    }
+    // The hold timer is captured instead of scheduled, so a test decides
+    // whether (and when) "the finger rested long enough" happens.
+    final class Timers { var pending: [() -> Void] = []; func fireAll() { let p = pending; pending = []; p.forEach { $0() } } }
+    func run(eraserKey: CGKeyCode?, _ body: (MouseInjector, Timers) -> Void) -> [String] {
+        let recorder = Recorder()
+        let timers = Timers()
+        body(MouseInjector(displayID: CGMainDisplayID(), eraserKey: eraserKey, poster: recorder,
+                           schedule: { _, work in timers.pending.append(work) }), timers)
+        return recorder.log
     }
     func run(eraserKey: CGKeyCode?, _ body: (MouseInjector) -> Void) -> [String] {
-        let recorder = Recorder()
-        body(MouseInjector(displayID: CGMainDisplayID(), eraserKey: eraserKey, poster: recorder))
-        return recorder.log
+        run(eraserKey: eraserKey) { injector, _ in body(injector) }
     }
     let eKey: CGKeyCode = 14
 
@@ -196,8 +208,64 @@ func runSelfTests() -> Int32 {
         i.handle(pkt(.down, tool: 2)); i.releaseStuckButton()
     } == ["mouseDown", "drag", "mouseUp", "mouseDown", "mouseUp"], "without --eraser-key the eraser acts like stylus")
 
+    // ---- finger gestures (one finger: tap / drag; two fingers: scroll / right-click) ----
+    expect(run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 0))
+    }.isEmpty, "a finger landing sends nothing yet (it may become a scroll)")
+    expect(run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 0)); i.handle(pkt(.up, tool: 0))
+    } == ["mouseDown", "mouseUp"], "one-finger tap = click")
+    expect(run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 0)); i.handle(pkt(.move, tool: 0, nx: 0.6)); i.handle(pkt(.move, tool: 0, nx: 0.7))
+        i.handle(pkt(.up, tool: 0, nx: 0.7))
+    } == ["mouseDown", "drag", "drag", "mouseUp"], "one finger moving = press where it landed, then drag")
+    expect(run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 0)); i.handle(pkt(.move, tool: 0, nx: 0.5005)); i.handle(pkt(.up, tool: 0, nx: 0.5005))
+    } == ["mouseDown", "mouseUp"], "a finger that only wobbles is still a tap")
+    expect(run(eraserKey: nil) { i, timers in
+        i.handle(pkt(.down, tool: 0)); timers.fireAll()
+        i.handle(pkt(.move, tool: 0, nx: 0.6)); i.handle(pkt(.up, tool: 0, nx: 0.6))
+    } == ["mouseDown", "drag", "mouseUp"], "a finger held still becomes a press, then drags")
+    expect(run(eraserKey: nil) { i, timers in
+        i.handle(pkt(.down, tool: 0)); i.handle(pkt(.up, tool: 0)); timers.fireAll()
+    } == ["mouseDown", "mouseUp"], "a hold timer that fires after the tap does nothing")
+    expect(run(eraserKey: nil) { i, timers in
+        i.handle(pkt(.down, tool: 0, id: 0)); i.handle(pkt(.down, tool: 0, id: 1, nx: 0.6)); timers.fireAll()
+        i.handle(pkt(.move, tool: 0, id: 0, ny: 0.6)); i.handle(pkt(.move, tool: 0, id: 1, nx: 0.6, ny: 0.6))
+        i.handle(pkt(.up, tool: 0, id: 1, nx: 0.6, ny: 0.6)); i.handle(pkt(.up, tool: 0, id: 0, ny: 0.6))
+    }.filter { !$0.hasPrefix("scroll(0,") } == ["move"], "two fingers moving down = cursor to the fingers, then only vertical scroll, no click")
+    let scrolled = run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 0, id: 0)); i.handle(pkt(.down, tool: 0, id: 1, nx: 0.6))
+        i.handle(pkt(.move, tool: 0, id: 0, ny: 0.6)); i.handle(pkt(.move, tool: 0, id: 1, nx: 0.6, ny: 0.6))
+    }.compactMap { entry -> Int? in
+        guard entry.hasPrefix("scroll(0,") else { return nil }
+        return Int(entry.dropFirst("scroll(0,".count).dropLast())
+    }
+    let screenHeight = Int(CGDisplayBounds(CGMainDisplayID()).height)
+    expect(!scrolled.isEmpty && scrolled.allSatisfy { $0 > 0 }, "fingers moving down scroll the content down (positive)")
+    expect(abs(scrolled.reduce(0, +) - (screenHeight - 1) / 10) <= 2, "scroll distance equals finger travel, 1:1")
+    expect(run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 0, id: 0)); i.handle(pkt(.down, tool: 0, id: 1, nx: 0.6))
+        i.handle(pkt(.up, tool: 0, id: 1, nx: 0.6)); i.handle(pkt(.up, tool: 0, id: 0))
+    } == ["move", "rightDown", "rightUp"], "two-finger tap = right-click, once")
+    expect(run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 0, id: 0)); i.handle(pkt(.move, tool: 0, id: 0, nx: 0.6))
+        i.handle(pkt(.down, tool: 0, id: 1, nx: 0.8)); i.handle(pkt(.move, tool: 0, id: 0, nx: 0.7))
+        i.handle(pkt(.up, tool: 0, id: 1, nx: 0.8)); i.handle(pkt(.up, tool: 0, id: 0, nx: 0.7))
+    } == ["mouseDown", "drag", "drag", "mouseUp"], "a second finger during a drag doesn't interrupt it")
+    expect(run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 0, id: 0)); i.handle(pkt(.down, tool: 0, id: 1, nx: 0.6))
+        i.releaseStuckButton()
+        i.handle(pkt(.down, tool: 0, id: 0)); i.handle(pkt(.up, tool: 0, id: 0))
+    } == ["move", "mouseDown", "mouseUp"], "a disconnect mid-scroll leaves nothing stuck; the next tap works")
+    expect(run(eraserKey: nil) { i in
+        i.handle(pkt(.down, tool: 0, id: 0)); i.handle(pkt(.down, tool: 0, id: 1, nx: 0.6))
+        i.handle(pkt(.up, tool: 0, id: 1, nx: 0.6))
+        i.handle(pkt(.move, tool: 0, id: 0, nx: 0.3)); i.handle(pkt(.up, tool: 0, id: 0, nx: 0.3))
+    } == ["move", "rightDown", "rightUp"], "the finger left over after a two-finger gesture doesn't start a drag")
+
     if failures == 0 {
-        print("selftest: OK (touch v2 parse, audio wire format, UDP fragmentation, discovery reply parse, eraser key)")
+        print("selftest: OK (touch v2 parse, audio wire format, UDP fragmentation, discovery reply parse, eraser key, touch gestures)")
         return 0
     }
     print("selftest: \(failures) failure(s)")

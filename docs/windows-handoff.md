@@ -8,11 +8,11 @@ Written 2026-11-13 from the Mac. Everything below is on the **`mac`** branch of
 The Mac has no JDK or Android SDK, so the Android receiver could not be built there. These are waiting for the
 Windows laptop (Android Studio installed, tablet on USB):
 
-1. **Build receiver versionCode 10** from `android-receiver/` and install it on the tablet. It carries three source
-   changes that have never been compiled: the idle decoder drain, the fading status label, and re-detecting the codec
-   on every host connection. Step-by-step: [build-receiver-on-windows.md](build-receiver-on-windows.md).
+1. **Build receiver versionCode 10** from `android-receiver/` and install it on the tablet. It carries four source
+   changes that have never been compiled: the idle decoder drain, the fading status label, re-detecting the codec
+   on every host connection, and blanking the screen when the stream ends. Step-by-step: [build-receiver-on-windows.md](build-receiver-on-windows.md).
 2. **Fix whatever does not compile** in those changes (all in `MainActivity.kt`), keeping their behaviour.
-3. **Check the three fixes on the tablet** with the Windows host (section 5 of the guide), and check nothing regressed:
+3. **Check the four fixes on the tablet** with the Windows host (section 5 of the guide), and check nothing regressed:
    USB and Wi-Fi streaming, touch, pairing, audio.
 4. **Raise the version gates to 10** so both launchers upgrade tablets that still have v9:
    `kRequiredAppVersion` in `windows-sender/src/main.cpp` (then rebuild the sender and the Windows installer
@@ -33,20 +33,23 @@ You are in a clone of https://github.com/Namans12/dual_display.git on my Windows
 
 Background. This project turns my Samsung Galaxy Tab S9 Ultra (SM-X910) into an extended display for a Windows PC
 or a Mac. `android-receiver/` is the tablet app, `windows-sender/` the Windows host, `mac-host/` the Mac host. On
-my Mac, three fixes were written into the tablet app's source
+my Mac, four fixes were written into the tablet app's source
 (android-receiver/app/src/main/java/com/heysnap/extdisplay/MainActivity.kt) and its versionCode was raised from 9
 to 10, but the Mac has no Android toolchain, so NONE of it has ever been compiled or run. This laptop has Android
 Studio. The tablet is connected by USB with USB debugging on.
 
 Read these before doing anything: docs/windows-handoff.md, docs/build-receiver-on-windows.md (the build and install
 steps, with what is verified and what is only expected), then `git diff c3fc542 HEAD -- android-receiver` to see
-exactly what changed in the receiver. The three changes are:
+exactly what changed in the receiver. The four changes are:
   1. decodeSession: a 4 ms queue poll and draining decoder output when idle, so a decoded frame is presented at
      once instead of when the next NAL arrives.
   2. The on-screen status label fades about 2.5 s after video is on screen and returns when the host disconnects
      (showStatus / setVideoShowing / onVideoShowing / setShowing, STATUS_LINGER_MS).
   3. The codec is re-detected for every host connection (streamGeneration, carriedNal, startsStream), so switching
      the host between H.264 and HEVC no longer leaves a dead picture.
+
+  4. When the host stops, an opaque black cover (idleCover) hides the last frame instead of leaving a frozen
+     desktop on the tablet; it lifts on the first decoded frame of the next stream.
 
 What I want you to do, in this order:
   1. Build the release APK (`gradlew.bat :app:assembleRelease` in android-receiver, with JAVA_HOME pointing at
@@ -57,7 +60,7 @@ What I want you to do, in this order:
      `adb shell dumpsys package com.heysnap.extdisplay`. If the install fails with
      INSTALL_FAILED_UPDATE_INCOMPATIBLE, stop and ask me before uninstalling: uninstalling wipes the saved pairing
      key on the tablet.
-  3. Verify the three fixes on the tablet using the Windows host, following section 5 of
+  3. Verify the four fixes on the tablet using the Windows host, following section 5 of
      docs/build-receiver-on-windows.md, including the HEVC on/off switch without restarting the tablet app. Use
      `adb exec-out screencap -p` screenshots and the tablet's on-screen status text as evidence; watch
      `adb logcat` (tag ExtDisplay) for decoder errors. Also confirm nothing regressed: USB and Wi-Fi streaming,

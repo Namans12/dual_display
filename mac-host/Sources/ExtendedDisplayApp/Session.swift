@@ -28,6 +28,7 @@ final class LaunchSession {
     private let onFinished: (SessionResult) -> Void
 
     private let cancel = AtomicFlag()
+    private var usbAdb: String?   // set once the USB path is prepared
     private let lock = NSLock()
     private var child: HostProcess?
 
@@ -122,12 +123,22 @@ final class LaunchSession {
 
         let exit = host.waitUntilExit()
         lock.lock(); child = nil; lock.unlock()
+        closeReceiver()
         log.note("MacHost exited: status \(exit.status)\(exit.signaled ? " (signal)" : "")")
 
         if cancel.isSet { return .stopped }
         parserLock.lock(); let last = parser.status; parserLock.unlock()
         if last.line.kind == .error { return .failed(last) }
         return .exited(exit.status)
+    }
+
+    // The stream is over. Receivers up to v9 keep showing the last frame, which
+    // looks like a frozen desktop, so over USB close the tablet app (the next
+    // Start opens it again). Over Wi-Fi there is no adb; the tablet app has to
+    // stay open to be found, and from v10 it blanks its own screen instead.
+    private func closeReceiver() {
+        guard config.settings.connection == .usb, let adb = usbAdb else { return }
+        _ = runCommand(adb, ["shell", "am", "force-stop", Self.receiverPackage], timeout: 10)
     }
 
     // Returns nil when the tablet is ready, or the terminal result. Mirrors the
@@ -142,6 +153,7 @@ final class LaunchSession {
                         hint: "Install Android platform-tools (brew install android-platform-tools) or use the packaged app.")
         }
         log.note("adb: \(adb)")
+        usbAdb = adb
 
         // 1. Wait for an authorised tablet.
         var lastState: AdbState?

@@ -85,9 +85,10 @@ func printUsage() {
       MacHost --remove-display                    # clear session virtual displays
       MacHost --selftest                          # protocol self-tests, then exit
 
-    Touch: tablet touches and S Pen drive the Mac cursor (down/drag/up, taps
-    click, double taps double-click; hover moves the pointer). Needs the
-    Accessibility permission. Disable with --no-touch.
+    Touch: one finger taps to click (twice to double-click) and drags to
+    select or move; two fingers scroll, and a two-finger tap right-clicks.
+    The S Pen presses and drags at once, with pressure; hovering moves the
+    pointer. Needs the Accessibility permission. Disable with --no-touch.
     --eraser-key <name> holds that key while the S Pen eraser end touches
     (macOS can't inject a real eraser; many drawing apps bind a key to it).
     Names: \(EraserKey.acceptedDescription) (US-layout positions).
@@ -804,7 +805,20 @@ struct MacHostMain {
         return (display, virtualDisplay.width, virtualDisplay.height, virtualDisplay)
     }
 
+    // MacHost has no windows, but ScreenCaptureKit makes the process check in
+    // with the window server, and macOS then lists it as an app. Inside
+    // ExtendedDisplay.app it inherits the bundle's identity, so a SECOND
+    // "Extended Display" icon appeared in the Dock on every Start and bounced
+    // for as long as the stream ran (an app that never finishes launching),
+    // then lingered among the Dock's recent apps. Declaring the process a
+    // background-only one before anything else keeps it out of the Dock.
+    static func stayOutOfTheDock() {
+        var psn = ProcessSerialNumber(highLongOfPSN: 0, lowLongOfPSN: UInt32(kCurrentProcess))
+        _ = TransformProcessType(&psn, ProcessApplicationTransformState(kProcessTransformToBackgroundApplication))
+    }
+
     static func main() async {
+        stayOutOfTheDock()
         setvbuf(stdout, nil, _IOLBF, 0)  // line-buffered: Finder launches log to a file
         signal(SIGPIPE, SIG_IGN)  // a dead-socket write must return an error, not kill us
         installSignalHandlers()   // SIGINT/SIGTERM → g_stop → clean teardown

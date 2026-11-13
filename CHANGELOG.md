@@ -11,6 +11,13 @@
 
 Mac host, verified on macOS 27 (M4) against receiver v9 on a Galaxy Tab S9 Ultra.
 
+- **Two-finger scrolling and right-click.** One finger taps and drags; two
+  fingers scroll the window under them; a two-finger tap right-clicks.
+- **No second Dock icon.** MacHost registered as a foreground app with the
+  launcher's identity and bounced in the Dock while streaming; it is now a
+  background-only process.
+- **Stop leaves no frozen picture:** over USB the launcher closes the tablet
+  app; the receiver source (v10) blanks its screen when the stream ends.
 - **Fixed: stale last frame.** The cursor stayed on the tablet after moving
   back to the Mac, and taps/updates showed one event late. The receiver only
   presents a decoded frame when the next NAL arrives and ScreenCaptureKit only

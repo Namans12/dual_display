@@ -106,12 +106,16 @@ enum EraserKey {
 protocol EventPoster {
     func mouse(_ type: CGEventType, at point: CGPoint, clickState: Int64, pressure: Double?)
     func key(_ code: CGKeyCode, down: Bool)
+    // Pixel scroll, in the direction the content should move: +dy = content
+    // moves down (follows a finger moving down), +dx = content moves right.
+    func scroll(dx: Int32, dy: Int32)
 }
 
 struct SystemEventPoster: EventPoster {
     func mouse(_ type: CGEventType, at point: CGPoint, clickState: Int64, pressure: Double?) {
+        let button: CGMouseButton = (type == .rightMouseDown || type == .rightMouseUp) ? .right : .left
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type,
-                                  mouseCursorPosition: point, mouseButton: .left) else { return }
+                                  mouseCursorPosition: point, mouseButton: button) else { return }
         if clickState > 0 {
             event.setIntegerValueField(.mouseEventClickState, value: clickState)
         }
@@ -130,30 +134,75 @@ struct SystemEventPoster: EventPoster {
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { return }
         event.post(tap: .cghidEventTap)
     }
+
+    func scroll(dx: Int32, dy: Int32) {
+        // wheel1 is vertical (positive = content moves down), wheel2 horizontal.
+        guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
+                                  wheel1: dy, wheel2: dx, wheel3: 0) else { return }
+        event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        event.post(tap: .cghidEventTap)
+    }
 }
 
-// Maps normalized tablet coordinates onto the captured display and drives the
-// mouse via CGEvent posted to the HID tap (the SendInput equivalent).
-// Single-pointer semantics, like the Windows host's v1 fallback path: the
-// first contact down owns the cursor until it lifts; other pointers are
-// ignored meanwhile. Stylus and eraser ride the same mouse path (the eraser
-// optionally also holds `eraserKey` for the contact — see EraserKey).
+// Maps normalized tablet coordinates onto the captured display and turns
+// touches into mouse input via CGEvent (the SendInput equivalent). macOS has no
+// public way to inject real multi-touch, so gestures are translated:
+//
+//   one finger   tap = click (double tap = double-click); press and move, or
+//                hold still for a moment, = drag (select, move windows)
+//   two fingers  move = scroll the window under them; tap = right-click
+//   S Pen        acts at once: down = press, move = drag (with pressure);
+//                the eraser end optionally also holds `eraserKey`
+//
+// A finger's mouse-down is therefore NOT sent the instant it lands: until it
+// moves, lifts or has rested for `holdDelay`, a second finger can still turn
+// the gesture into a scroll. Sending it at once (the old behaviour) made
+// every touch a press-and-drag, so there was no way to scroll.
+//
+// All state is confined to `queue` (packets arrive on the touch thread, the
+// hold timer fires on the queue, stop() comes from another thread).
 final class MouseInjector {
+    private enum Gesture {
+        case idle
+        case pending(id: Int, point: CGPoint, token: Int)  // finger down, mouse-down not sent yet
+        case dragging(id: Int)                             // button is down
+        case scrolling                                     // two fingers
+        case spent                                         // gesture resolved; waiting for fingers to lift
+    }
+
+    static let holdDelay: TimeInterval = 0.15   // rest this long and it becomes a press
+    static let dragSlop: CGFloat = 6            // points a finger may wander and still be a tap
+    static let twoFingerTapTime: TimeInterval = 0.35
+
     private let displayID: CGDirectDisplayID
     private let eraserKey: CGKeyCode?  // nil = eraser behaves exactly like stylus
     private let poster: EventPoster
-    private var ownerPointerId = -1  // -1 = button not down
-    private var heldEraserKey: CGKeyCode?  // key currently down for the owning contact
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+    private let queue = DispatchQueue(label: "touch.injector")
+
+    private var gesture = Gesture.idle
+    private var fingers: [Int: CGPoint] = [:]  // finger contacts currently down
+    private var nextToken = 0
+    private var heldEraserKey: CGKeyCode?  // key currently down for the dragging contact
     private var lastPoint = CGPoint.zero
     private var lastUpTime = Date.distantPast
     private var lastUpPoint = CGPoint.zero
     private var clickState: Int64 = 1
+    // Scroll bookkeeping.
+    private var lastCentroid = CGPoint.zero
+    private var scrollRemainder = CGPoint.zero  // sub-pixel carry
+    private var scrollTravel: CGFloat = 0
+    private var scrollStart = Date.distantPast
 
+    // `schedule` exists so --selftest can fire the hold timer by hand.
     init(displayID: CGDirectDisplayID, eraserKey: CGKeyCode? = nil,
-         poster: EventPoster = SystemEventPoster()) {
+         poster: EventPoster = SystemEventPoster(),
+         schedule: ((TimeInterval, @escaping () -> Void) -> Void)? = nil) {
         self.displayID = displayID
         self.eraserKey = eraserKey
         self.poster = poster
+        let queue = self.queue
+        self.schedule = schedule ?? { delay, work in queue.asyncAfter(deadline: .now() + delay, execute: work) }
     }
 
     private func mapToGlobal(_ nx: Float, _ ny: Float) -> CGPoint {
@@ -175,49 +224,137 @@ final class MouseInjector {
         poster.key(code, down: false)
     }
 
+    // Synthetic events carry their own click count — the OS only computes it
+    // for hardware clicks. Same spot + quick succession must count up or
+    // double-click never works from the tablet.
+    private func pressButton(at point: CGPoint, pressure: Double?) {
+        if Date().timeIntervalSince(lastUpTime) < 0.4,
+           hypot(point.x - lastUpPoint.x, point.y - lastUpPoint.y) < 8 {
+            clickState += 1
+        } else {
+            clickState = 1
+        }
+        post(.leftMouseDown, point, clickState: clickState, pressure: pressure)
+    }
+
+    private func releaseButton(at point: CGPoint, pressure: Double?) {
+        lastUpTime = Date()
+        lastUpPoint = point
+        post(.leftMouseUp, point, clickState: clickState, pressure: pressure)
+        releaseEraserKey()
+    }
+
+    private func centroid() -> CGPoint {
+        let n = CGFloat(max(fingers.count, 1))
+        return CGPoint(x: fingers.values.reduce(0) { $0 + $1.x } / n,
+                       y: fingers.values.reduce(0) { $0 + $1.y } / n)
+    }
+
     func handle(_ packet: TouchPacket) {
+        queue.sync { handleOnQueue(packet) }
+    }
+
+    private func handleOnQueue(_ packet: TouchPacket) {
         diagTrace("TOUCH \(packet.type) tool=\(packet.tool)")
         let point = mapToGlobal(packet.nx, packet.ny)
         lastPoint = point
-        // tool 0 = finger (plain mouse semantics); 1/2 = stylus/eraser, which
-        // carry pressure (0..1024 → 0..1) while in contact.
-        let penPressure: Double? = packet.tool != 0 ? Double(packet.pressure) / 1024.0 : nil
+        let id = Int(packet.pointerId)
+        let isFinger = packet.tool == 0
+        // Stylus/eraser carry pressure (0..1024 → 0..1) while in contact.
+        let penPressure: Double? = isFinger ? nil : Double(packet.pressure) / 1024.0
+
         switch packet.type {
         case .down:
-            guard ownerPointerId < 0 else { return }  // single-pointer: ignore extra fingers
-            ownerPointerId = Int(packet.pointerId)
-            // Synthetic events carry their own click count — the OS only
-            // computes it for hardware clicks. Same spot + quick succession
-            // must count up or double-click never works from the tablet.
-            if Date().timeIntervalSince(lastUpTime) < 0.4,
-               hypot(point.x - lastUpPoint.x, point.y - lastUpPoint.y) < 8 {
-                clickState += 1
-            } else {
-                clickState = 1
+            if !isFinger {
+                // The pen acts immediately (drawing must not lag) and only when
+                // nothing else owns the pointer.
+                guard case .idle = gesture else { return }
+                if packet.tool == 2, let eraserKey {
+                    // Before the mouse-down, so the app switches tool before the stroke.
+                    heldEraserKey = eraserKey
+                    poster.key(eraserKey, down: true)
+                }
+                pressButton(at: point, pressure: penPressure)
+                gesture = .dragging(id: id)
+                return
             }
-            // Only the contact that owns the pointer presses the key, and only
-            // before its mouse-down so the app switches tool before the stroke.
-            if packet.tool == 2, let eraserKey {
-                heldEraserKey = eraserKey
-                poster.key(eraserKey, down: true)
+            fingers[id] = point
+            switch gesture {
+            case .idle:
+                nextToken += 1
+                let token = nextToken
+                gesture = .pending(id: id, point: point, token: token)
+                schedule(Self.holdDelay) { [weak self] in self?.holdElapsed(token: token) }
+            case .pending:
+                // A second finger before the first became a press: scroll.
+                gesture = .scrolling
+                lastCentroid = centroid()
+                scrollRemainder = .zero
+                scrollTravel = 0
+                scrollStart = Date()
+                // Scroll events go to the window under the cursor.
+                post(.mouseMoved, lastCentroid)
+            case .dragging, .scrolling, .spent:
+                break  // extra fingers don't change a gesture already under way
             }
-            post(.leftMouseDown, point, clickState: clickState, pressure: penPressure)
+
         case .move:
-            if Int(packet.pointerId) == ownerPointerId {
+            if isFinger, fingers[id] != nil { fingers[id] = point }
+            switch gesture {
+            case .dragging(let owner) where owner == id:
                 post(.leftMouseDragged, point, clickState: clickState, pressure: penPressure)
-            } else if ownerPointerId < 0 {
+            case .pending(let owner, let start, _) where owner == id:
+                if hypot(point.x - start.x, point.y - start.y) > Self.dragSlop {
+                    // Press where the finger landed, then drag to where it is now.
+                    pressButton(at: start, pressure: nil)
+                    gesture = .dragging(id: id)
+                    post(.leftMouseDragged, point, clickState: clickState)
+                }
+            case .scrolling where isFinger && fingers.count >= 2:
+                let now = centroid()
+                let dx = now.x - lastCentroid.x + scrollRemainder.x
+                let dy = now.y - lastCentroid.y + scrollRemainder.y
+                scrollTravel += hypot(now.x - lastCentroid.x, now.y - lastCentroid.y)
+                lastCentroid = now
+                let stepX = dx.rounded(.towardZero), stepY = dy.rounded(.towardZero)
+                scrollRemainder = CGPoint(x: dx - stepX, y: dy - stepY)
+                if stepX != 0 || stepY != 0 {
+                    poster.scroll(dx: Int32(stepX), dy: Int32(stepY))
+                }
+            case .idle:
                 post(.mouseMoved, point)
+            default:
+                break
             }
+
         case .up, .cancel:
-            guard Int(packet.pointerId) == ownerPointerId else { return }
-            ownerPointerId = -1
-            lastUpTime = Date()
-            lastUpPoint = point
-            post(.leftMouseUp, point, clickState: clickState,
-                 pressure: packet.tool != 0 ? 0.0 : nil)
-            releaseEraserKey()
+            if isFinger { fingers[id] = nil }
+            switch gesture {
+            case .dragging(let owner) where owner == id:
+                releaseButton(at: point, pressure: isFinger ? nil : 0.0)
+                gesture = fingers.isEmpty ? .idle : .spent
+            case .pending(let owner, let start, _) where owner == id:
+                if packet.type == .up {  // a tap: click where the finger landed
+                    pressButton(at: start, pressure: nil)
+                    releaseButton(at: start, pressure: nil)
+                }
+                gesture = fingers.isEmpty ? .idle : .spent
+            case .scrolling where isFinger:
+                // Two fingers that barely moved and left quickly: right-click.
+                if packet.type == .up, scrollTravel < Self.dragSlop,
+                   Date().timeIntervalSince(scrollStart) < Self.twoFingerTapTime {
+                    post(.rightMouseDown, lastCentroid, clickState: 1)
+                    post(.rightMouseUp, lastCentroid, clickState: 1)
+                }
+                gesture = fingers.isEmpty ? .idle : .spent
+            case .spent where fingers.isEmpty:
+                gesture = .idle
+            default:
+                break
+            }
+
         case .hoverMove:
-            if ownerPointerId < 0 {  // S Pen hovering; don't disturb a drag
+            if case .idle = gesture {  // S Pen hovering; don't disturb a gesture
                 post(.mouseMoved, point)
             }
         case .hoverExit:
@@ -225,13 +362,26 @@ final class MouseInjector {
         }
     }
 
+    // The finger has rested without moving: treat it as a press (so a
+    // press-and-hold, or a drag that starts very slowly, still works).
+    private func holdElapsed(token: Int) {
+        guard case .pending(let id, let point, let current) = gesture, current == token else { return }
+        pressButton(at: point, pressure: nil)
+        gesture = .dragging(id: id)
+    }
+
     // The tablet disconnected mid-gesture: don't leave the button (or the
-    // eraser key) stuck down.
+    // eraser key) stuck down, and forget any half-finished gesture.
     func releaseStuckButton() {
-        guard ownerPointerId >= 0 else { return }
-        ownerPointerId = -1
-        post(.leftMouseUp, lastPoint)
-        releaseEraserKey()
+        queue.sync {
+            if case .dragging = gesture {
+                post(.leftMouseUp, lastPoint)
+                releaseEraserKey()
+            }
+            gesture = .idle
+            fingers.removeAll()
+            nextToken += 1  // cancels a hold timer still in flight
+        }
     }
 }
 

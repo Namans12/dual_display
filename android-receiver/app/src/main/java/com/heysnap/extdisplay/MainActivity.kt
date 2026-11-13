@@ -113,6 +113,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var rootLayout: FrameLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var statusView: TextView
+    // Opaque black sheet over the video, shown whenever there is no live
+    // picture. Without it the last decoded frame stayed on screen after the host
+    // stopped, looking like a frozen desktop.
+    private lateinit var idleCover: View
     private lateinit var pairInput: EditText
     private lateinit var pairPanel: LinearLayout
     private var receiver: H264TcpReceiver? = null
@@ -137,6 +141,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun setVideoShowing(showing: Boolean) {
         videoShowing = showing
         statusView.removeCallbacks(hideStatus)
+        idleCover.visibility = if (showing) View.GONE else View.VISIBLE
         if (showing) {
             statusView.postDelayed(hideStatus, STATUS_LINGER_MS)
         } else {
@@ -235,9 +240,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             addView(pairInput, LinearLayout.LayoutParams(360, LinearLayout.LayoutParams.WRAP_CONTENT))
         }
 
+        idleCover = View(this).apply { setBackgroundColor(0xFF000000.toInt()) }
+
         rootLayout = FrameLayout(this).apply {
             setBackgroundColor(0xFF000000.toInt())
             addView(surfaceView, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ))
+            // Above the video, below the status label and pairing box.
+            addView(idleCover, FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             ))
@@ -658,7 +670,7 @@ private class H264TcpReceiver(
                 // The picture on screen is now a frozen last frame: say so.
                 if (running.get() && videoShowing) {
                     setShowing(false)
-                    onStatus("Host disconnected — waiting for it to reconnect")
+                    onStatus("Disconnected — waiting for the computer")
                 }
             }
         }

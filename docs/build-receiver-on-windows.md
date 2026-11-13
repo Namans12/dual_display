@@ -10,7 +10,7 @@ this project. Anything marked **Unverified** may differ on your machine.
 
 ## What you are building
 
-Three changes to the receiver, all in `android-receiver/app/src/main/java/com/heysnap/extdisplay/MainActivity.kt`.
+Four changes to the receiver, all in `android-receiver/app/src/main/java/com/heysnap/extdisplay/MainActivity.kt`.
 `versionCode` goes from 9 to 10 (`android-receiver/app/build.gradle`); `versionName` stays `0.8.0`, so the app info
 screen will still say 0.8.0.
 
@@ -28,6 +28,10 @@ screen will still say 0.8.0.
    showed no picture until the app was restarted. This was reproduced on the tablet with receiver v9. Now each new host
    connection ends the decode session, and the next session picks the codec again from the new stream's parameter sets
    (`streamGeneration`, `carriedNal`, `startsStream` in `H264TcpReceiver`).
+
+4. **Blank screen when the stream ends.** After the host stopped, the last frame stayed on the tablet and looked like a
+   frozen desktop. An opaque black cover (`idleCover`) now sits over the video whenever there is no live picture, with
+   the status label on top ("Disconnected — waiting for the computer"). It lifts again on the first decoded frame.
 
 The wire protocol is unchanged, so the v10 receiver works with the existing Windows host and with the Mac host.
 
@@ -292,7 +296,7 @@ Run `ExtendedDisplay.exe` (installed copy, or a build from `windows-sender`), ch
 |---|---|
 | Start streaming | The label shows "Connected (USB/TCP): 127.0.0.1", then "Decoding H.264" (or HEVC) while the picture comes up. |
 | Wait about 2.5 s after the desktop appears | The label disappears. Nothing is drawn over the desktop. |
-| Press **Stop** in the GUI | The label comes back: "Host disconnected — waiting for it to reconnect", over the frozen last frame, and stays. |
+| Press **Stop** in the GUI | The picture goes black (no frozen last frame) and the label comes back: "Disconnected — waiting for the computer", and stays. |
 | Start again | "Connected (USB/TCP)..." returns, then fades again after the picture is up. |
 | Stop, tick **HEVC**, Start again (do not restart the tablet app); then untick it and Start again | The picture comes up each time, and the label briefly reads "Decoding HEVC" / "Decoding H.264". With v9 the first switch gave a black or frozen picture. |
 | Move the mouse cursor onto the tablet display, and back off | It follows immediately. No cursor image is left behind. Tap a window: the click registers without delay. |
@@ -311,14 +315,14 @@ the manual `MacHost --host 127.0.0.1` command with and without `--hevc`.
 | Start streaming | Same label sequence as above, then it fades about 2.5 s after the picture is up. |
 | Move the cursor from the Mac's own screen onto the tablet display, then back off | The cursor does not stay frozen on the tablet. It must disappear as soon as it leaves. |
 | Click once on something on the tablet | The result shows at once, not one event late. |
-| Stop MacHost | "Host disconnected — waiting for it to reconnect" returns. |
+| Stop MacHost | "Disconnected — waiting for the computer" returns. |
 
 The Mac host's own 250 ms workaround also hides the old bug, so you will not see a dramatic before-and-after. What you
 can check is that nothing is worse and that the label behaviour is right.
 
 ### Limits of what these checks cover
 
-- The "Host disconnected" label is set only in the TCP connection loop. **Expectation, from reading the code:** over
+- The "Disconnected" label is set only in the TCP connection loop. **Expectation, from reading the code:** over
   Wi-Fi/UDP the label fades after video starts, but it will not come back when the host stops. That is not a bug in this
   build.
 - A "Decoder reset: ..." message, if one ever appears while video is showing, is shown for 2.5 s and fades again. It
@@ -390,6 +394,8 @@ bump the Windows gate is your decision. Keeping it at 9 is harmless because v10 
      created; in `H264TcpReceiver` the `onVideoShowing` constructor parameter, `setShowing`, the `setShowing(false)` in
      the TCP loop's `finally` block and `setShowing(true)` in `drainOutput`.
    - Decode loop: the 4 ms `nalQueue.poll` followed by `drainOutput` in `decodeSession`.
+   - Blank screen: the `idleCover` view (declared next to `statusView`, created and added in `onCreate`, toggled in
+     `setVideoShowing`).
    - Codec switching: `streamGeneration` and `carriedNal` fields, the `nalQueue.clear()` /
      `streamGeneration.incrementAndGet()` pair after `accept()`, `startsStream`, and in `decodeSession` the
      parameter-set wait at the top plus the generation check that sets `carriedNal` and returns.
