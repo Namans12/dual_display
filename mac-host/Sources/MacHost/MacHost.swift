@@ -630,8 +630,14 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
     private func repeatLastFrameIfIdle() {
         guard repeatsLeft > 0, let buffer = lastBuffer else { return }
         let now = DispatchTime.now().uptimeNanoseconds
-        // A fresh frame arrived within the last interval — capture is keeping up.
-        guard now &- lastSubmitNs >= frameIntervalNs - frameIntervalNs / 4 else { return }
+        // Capture jitters by up to a frame while content is moving, so the first
+        // repeat waits for ~2 silent intervals (otherwise we'd wedge duplicates
+        // between live frames and double the encoder's load); after that, one
+        // repeat per interval.
+        let firstRepeat = repeatsLeft == repeatBudget
+        let quiet = firstRepeat ? frameIntervalNs * 2 - frameIntervalNs / 4
+                                : frameIntervalNs - frameIntervalNs / 4
+        guard now &- lastSubmitNs >= quiet else { return }
         repeatsLeft -= 1
         lastSubmitNs = now
         if repeatsLeft == 0 { lastBuffer = nil }  // hand the surface back once we're done

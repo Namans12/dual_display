@@ -24,8 +24,14 @@ final class VirtualDisplay {
     private static let productID: UInt32 = 0x4544
     private static let sizeMm = CGSize(width: 314.6, height: 196.4)
 
+    // The display is always DECLARED at 120 Hz, even for a 60 fps stream.
+    // Measured on macOS 27 (M4): WindowServer refreshes a virtual display's
+    // contents at half its declared rate — declared 60 Hz yields 30 real
+    // frames/s from ScreenCaptureKit (evenly spaced 33 ms apart, while the app
+    // on it draws at 60); declared 120 Hz yields a steady 60. Declaring 240 Hz
+    // gains nothing further (apps here still draw at 60).
     static func target(forFps fps: Int) -> (width: Int, height: Int, hz: Double) {
-        fps >= 120 ? (1920, 1200, 120.0) : (nativeWidth, nativeHeight, 60.0)
+        fps >= 120 ? (1920, 1200, 120.0) : (nativeWidth, nativeHeight, 120.0)
     }
 
     let width: Int
