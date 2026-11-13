@@ -335,6 +335,17 @@ enum VideoCodec {
     }
 }
 
+// Debugging aid: EXTDISP_TRACE=1 logs every frame into the encoder (IN), out
+// of it (OUT, with size) and every idle re-submission (REPEAT) to stderr.
+let diagTraceOn = ProcessInfo.processInfo.environment["EXTDISP_TRACE"] == "1"
+let diagTraceStart = DispatchTime.now().uptimeNanoseconds
+func diagTrace(_ message: @autoclosure () -> String) {
+    guard diagTraceOn else { return }
+    let start = diagTraceStart  // read first: the lazy global must initialise before "now"
+    let ms = Double(DispatchTime.now().uptimeNanoseconds &- start) / 1_000_000
+    fputs("TRACE \(String(format: "%9.1f", ms)) \(message())\n", stderr)
+}
+
 final class AnnexBEncoder {
     private let sender: VideoSender
     private let codec: VideoCodec
@@ -414,6 +425,7 @@ final class AnnexBEncoder {
     func encode(_ imageBuffer: CVImageBuffer) throws {
         guard let session else { return }
         let presentationTime = CMTime(value: frameCount, timescale: CMTimeScale(fps))
+        diagTrace("IN  \(frameCount)")
         frameCount += 1
 
         let status = VTCompressionSessionEncodeFrame(
@@ -442,6 +454,8 @@ final class AnnexBEncoder {
             Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque()
         )
         let isKeyframe = !notSync
+        diagTrace("OUT \(CMSampleBufferGetPresentationTimeStamp(sampleBuffer).value) " +
+                  "bytes=\(CMSampleBufferGetTotalSampleSize(sampleBuffer))\(isKeyframe ? " key" : "")")
 
         if isKeyframe || !sentParameterSets {
             try writeParameterSets(sampleBuffer)
@@ -532,6 +546,25 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
     private let audioSink: ((CMSampleBuffer) -> Void)?
     private var stream: SCStream?
 
+    // ScreenCaptureKit only delivers a frame when the screen changes, so a
+    // still desktop sends nothing. Two things go wrong if we leave it there:
+    //  - the tablet's decoder only presents a decoded frame when the NEXT one
+    //    arrives, so the newest frame (the cursor leaving, the result of a tap)
+    //    stays undisplayed until something else changes;
+    //  - the last frame of a burst of motion is the blurriest one the encoder
+    //    made, and nothing ever sharpens it.
+    // So after the screen goes still we re-submit the last frame a few times at
+    // the normal frame rate (what a constant-frame-rate sender — the Windows
+    // host's ffmpeg — does all the time). Identical frames cost a few hundred
+    // bytes each. All of this state lives on `frameQueue`.
+    private let frameQueue = DispatchQueue(label: "screen.frames")
+    private var repeatTimer: DispatchSourceTimer?
+    private var lastBuffer: CVImageBuffer?
+    private var lastSubmitNs: UInt64 = 0
+    private var repeatsLeft = 0
+    private var repeatBudget = 0
+    private var frameIntervalNs: UInt64 = 16_666_667
+
     init(encoder: AnnexBEncoder, audioSink: ((CMSampleBuffer) -> Void)? = nil) {
         self.encoder = encoder
         self.audioSink = audioSink
@@ -543,7 +576,8 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
         configuration.width = width
         configuration.height = height
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-        configuration.queueDepth = fps >= 120 ? 5 : 3
+        // One more than before: we keep the newest frame alive for re-submission.
+        configuration.queueDepth = fps >= 120 ? 6 : 4
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         configuration.showsCursor = true
         if audioSink != nil {
@@ -556,19 +590,57 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
         }
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "screen.frames"))
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: frameQueue)
         if audioSink != nil {
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "audio.frames"))
         }
         try await stream.startCapture()
         self.stream = stream
+        startRepeatTimer(fps: fps)
     }
 
     func stop() async {
+        frameQueue.sync {
+            repeatTimer?.cancel()
+            repeatTimer = nil
+            lastBuffer = nil
+            repeatsLeft = 0
+        }
         if let stream {
             try? await stream.stopCapture()
         }
         stream = nil
+    }
+
+    private func startRepeatTimer(fps: Int) {
+        frameQueue.sync {
+            frameIntervalNs = UInt64(1_000_000_000 / max(fps, 1))
+            repeatBudget = max(fps / 4, 2)  // ~250 ms of repeats after the last change
+            let timer = DispatchSource.makeTimerSource(queue: frameQueue)
+            timer.schedule(deadline: .now() + .nanoseconds(Int(frameIntervalNs)),
+                           repeating: .nanoseconds(Int(frameIntervalNs)),
+                           leeway: .milliseconds(1))
+            timer.setEventHandler { [weak self] in self?.repeatLastFrameIfIdle() }
+            timer.resume()
+            repeatTimer = timer
+        }
+    }
+
+    // Runs on frameQueue once per frame interval.
+    private func repeatLastFrameIfIdle() {
+        guard repeatsLeft > 0, let buffer = lastBuffer else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        // A fresh frame arrived within the last interval — capture is keeping up.
+        guard now &- lastSubmitNs >= frameIntervalNs - frameIntervalNs / 4 else { return }
+        repeatsLeft -= 1
+        lastSubmitNs = now
+        if repeatsLeft == 0 { lastBuffer = nil }  // hand the surface back once we're done
+        diagTrace("REPEAT left=\(repeatsLeft)")
+        do {
+            try encoder.encode(buffer)
+        } catch {
+            fputs("Frame encode error: \(error)\n", stderr)
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
@@ -582,6 +654,9 @@ final class ScreenCaptureHost: NSObject, SCStreamOutput {
             return
         }
 
+        lastBuffer = imageBuffer
+        lastSubmitNs = DispatchTime.now().uptimeNanoseconds
+        repeatsLeft = repeatBudget
         do {
             try encoder.encode(imageBuffer)
         } catch {

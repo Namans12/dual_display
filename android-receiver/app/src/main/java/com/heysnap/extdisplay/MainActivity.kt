@@ -724,7 +724,16 @@ private class H264TcpReceiver(
             val info = MediaCodec.BufferInfo()
             var nal: ByteArray? = first  // feed the peeked NAL first
             while (running.get()) {
-                val current = nal ?: nalQueue.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                // Short poll, and drain on every idle wake-up: a frame finishes
+                // decoding a few ms AFTER its NAL is queued, so the drain right
+                // after queueInputBuffer misses it. Waiting for the next NAL to
+                // drain left the newest frame undisplayed whenever the host
+                // paused (the Mac host only sends frames when the screen changes).
+                val current = nal ?: nalQueue.poll(4, TimeUnit.MILLISECONDS)
+                if (current == null) {
+                    drainOutput(decoder, info)
+                    continue
+                }
                 nal = null
                 var queued = false
                 while (running.get() && !queued) {
