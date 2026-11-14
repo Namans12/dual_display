@@ -1,6 +1,6 @@
 # Build the Android receiver (versionCode 10) on Windows
 
-**What you get at the end:** an APK, `app-release.apk`, built from the `mac` branch and installed on the tablet, where
+**What you get at the end:** an APK, `app-release.apk`, built from `main` and installed on the tablet, where
 `adb shell dumpsys package com.heysnap.extdisplay` reports `versionCode=10`. You will also have that same file ready to
 bundle into the Mac and Windows installers.
 
@@ -69,14 +69,12 @@ menu wording differs between Android Studio versions.
 
 ## 1. Get the code
 
-The receiver changes are on the **`mac`** branch only. They are not on `main`.
-
-The `mac` branch was pushed from the Mac on 2026-11-13 with these changes.
+The receiver changes are on **`main`** (merged from the `mac` branch on 2026-11-15).
 
 Fresh clone:
 
 ```powershell
-git clone -b mac https://github.com/Namans12/dual_display.git
+git clone https://github.com/Namans12/dual_display.git
 ```
 
 ```powershell
@@ -90,7 +88,7 @@ git fetch origin
 ```
 
 ```powershell
-git checkout mac
+git checkout main
 ```
 
 ```powershell
@@ -106,12 +104,11 @@ git log -1 --oneline -- android-receiver
 Expected output:
 
 ```text
-7b03cd8 Receiver: re-detect the codec for each host connection (H.264 <-> HEVC)
+a70cc9f Mac: two-finger scroll + right-click, no second Dock icon, Stop clears the tablet
 ```
 
-The other two changes are in `67b51da Receiver: fade the status label once video is showing (versionCode 10)` and
-`892d759 Mac: fix stale last frame (ghost cursor, laggy updates) on a still screen`. The branch tip itself will be
-later than `7b03cd8`; that is fine.
+The four receiver changes arrived in `892d759`, `67b51da`, `7b03cd8` and `a70cc9f`. A later commit touching
+`android-receiver` (for example a pairing-prompt change) is fine too.
 
 Check the version number in the source:
 
@@ -406,7 +403,7 @@ bump the Windows gate is your decision. Keeping it at 9 is harmless because v10 
 git worktree add ..\dual_display_v9 c3fc542
 ```
 
-   If that builds and the `mac` branch does not, the cause is in the edits. If neither builds, it is the toolchain
+   If that builds and `main` does not, the cause is in the edits. If neither builds, it is the toolchain
    (JDK, SDK, network). Remove the extra folder afterwards with `git worktree remove ..\dual_display_v9`.
 
 ## Troubleshooting

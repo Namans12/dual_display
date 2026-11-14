@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.10.0 — 2026-11-13 (Mac package; receiver v10 pending a Windows build)
+## v0.10.0 — 2026-11-15 (Mac package, verified on device; receiver v10 pending a Windows build)
 
 - **Installable Mac app.** Signed with one self-signed certificate so privacy
   grants survive updates and each System Settings list has a single entry
@@ -35,10 +35,9 @@ Mac host, verified on macOS 27 (M4) against receiver v9 on a Galaxy Tab S9 Ultra
   bytes while scrolling text).
 - **Native launcher window** replaces the silent bash launcher in
   ExtendedDisplay.app (connection, quality, options, pairing code, Start/Stop,
-  live status). Builds, signs, self-tests; Start against a tablet not yet
-  exercised.
+  live status).
 - **`--eraser-key <name>`** (opt-in): holds a key while a stylus eraser end
-  touches. Self-tested; untested with real eraser hardware.
+  touches. Self-tested; untested with real eraser hardware (the S Pen has none).
 - **Receiver (source only, no APK yet):** drain decoder output on idle so a
   frame is presented without waiting for the next NAL.
 - **Low-latency H.264 encoding** (VideoToolbox low-latency rate control): ~15 ms

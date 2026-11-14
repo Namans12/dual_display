@@ -28,7 +28,9 @@ ExtendedDisplaySender.exe --bitrate 40000   # crisper text
 
 ## For Users — Mac
 
-Build `ExtendedDisplay.dmg` on a Mac with [installers/mac/build-dmg.sh](installers/mac/build-dmg.sh), drag to Applications, plug in the tablet, launch — or run `MacHost` from the CLI over USB/Wi-Fi. The Mac host is at **feature parity** with Windows for everything macOS can express: **native extended display** (CGVirtualDisplay, 2960×1848@60 or 1920×1200@120), **touch-back with S Pen pressure**, **desktop audio** (`--audio`), **Wi-Fi discovery** (`--wifi`), **UDP video** (`--udp`), **PIN pairing + AES-256-GCM** on every channel, and **H.264/HEVC** — same Android app. Still Windows-only: real multi-touch injection and HDR (platform limits). Full guide + feature matrix: [docs/mac.md](docs/mac.md).
+Download **`ExtendedDisplay-<version>.dmg`** from [Releases](https://github.com/Namans12/dual_display/releases), drag **Extended Display** to Applications, open it (first time: right-click → Open, or System Settings → Privacy & Security → Open Anyway), grant the two permissions the window lists, and press **Start Streaming** — USB or Wi-Fi. Full guide, gestures, measurements and limits: [docs/mac.md](docs/mac.md).
+
+What the Mac host does: a native extended display at 2960×1848 and a real 60 fps, H.264/HEVC, USB and Wi-Fi with discovery, touch (tap, drag, two-finger scroll, two-finger right-click) and S Pen with pressure, desktop audio, optional pairing + AES-256-GCM, a settings window with first-run permissions and a clean Uninstall. Not possible on macOS: real multi-touch (pinch) and HDR.
 
 ## Capabilities
 
@@ -94,4 +96,12 @@ See [docs/build.md](docs/build.md) for building each component and the full CLI,
 
 - QR-scan pairing (today you type the 8-char code; the encryption itself shipped in v0.8.0 — see [SECURITY.md](SECURITY.md)).
 - UDP loss resilience: FEC + on-demand keyframes + RTT-adaptive bitrate (needs a receiver→sender feedback channel; deliberately deferred — see [Fixes.md](Fixes.md)).
-- Mac: v0.9.0 reached working parity — virtual display, touch-back + S Pen pressure, discovery, pairing/AES-256-GCM, desktop audio, UDP, 120 fps, HEVC. Still open: real multi-touch injection and HDR (macOS platform limits), full eraser semantics, a native settings GUI (see [docs/mac.md](docs/mac.md)).
+- Mac: true pinch/multi-touch and HDR (macOS platform limits); notarized Developer ID signing (today the app is self-signed).
+- Receiver v10 (frame presentation, fading status label, codec switching, blank screen on stop, clearer pairing prompt): source is in the repo, APK build pending — see [docs/windows-handoff.md](docs/windows-handoff.md).
+
+## Related Repositories
+
+| Repo | Relationship |
+|---|---|
+| [`wizlight`](https://github.com/Namans12/wizlight) | Screen capture streamed to smart bulbs; its Android app solves a similar capture-and-transmit problem with MediaProjection |
+| [`wiz2`](https://github.com/Namans12/wiz2) | Its working copy — `prefinal` adds `display_detection.py` for multi-monitor handling, directly relevant here |

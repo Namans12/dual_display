@@ -120,11 +120,10 @@ Wi-Fi the tablet app stays open to be found again, and from receiver v10 it blan
 On USB, Start restarts the tablet app: receivers up to v9 keep the decoder of their first stream, so switching
 H.264 ↔ HEVC otherwise gave no picture (fixed in the receiver source for v10).
 
-> Status (2026-11-13, macOS 27). Verified by running: the app builds, signs with the certificate and passes its
-> self-tests; Start finds the tablet, sets up USB, launches MacHost and reports a missing Screen Recording
-> permission clearly; **Uninstall…** on a copy removed the app, settings, pairing code, log and saved window state.
-> Not verified yet: a full stream through the app after granting its permissions, Stop/quit with a live stream,
-> and that the privacy entries disappear from System Settings after Uninstall (only visible on screen).
+> Status (2026-11-15, macOS 27, MacBook Air M4 + Galaxy Tab S9 Ultra, receiver v9). Verified on device through the
+> packaged app: install from the DMG, the permission checklist, Start/Stop over USB and Wi-Fi, all three quality
+> presets, HEVC, desktop audio with mute, touch gestures, a single Dock icon, the tablet returning to its home
+> screen after a USB Stop, Uninstall removing the privacy entries, and grants surviving an app update.
 
 ## Quick start — manual build / run
 
@@ -272,8 +271,8 @@ macOS has no public way to inject real multi-touch, so the host translates gestu
 
 A finger's press is not sent the instant it lands: until it moves, lifts or has rested briefly, a second finger can
 still turn the gesture into a scroll. (Before this, every touch was an immediate press-and-drag, so there was no way
-to scroll.) The gesture logic is covered by `MacHost --selftest`; scrolling with real fingers on the tablet is the one
-part that was not exercised when this was written.
+to scroll.) The gesture logic is covered by `MacHost --selftest` and was confirmed with real fingers on the
+tablet (scroll and two-finger right-click).
 
 ## S Pen eraser key (`--eraser-key`)
 
