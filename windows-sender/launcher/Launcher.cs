@@ -1,0 +1,487 @@
+// Extended Display launcher — a small WinForms settings dialog that configures
+// and starts ExtendedDisplaySender.exe, and manages the virtual display driver
+// (enable on Start, disable on Stop so no ghost monitor lingers).
+//
+// Compiled to a real .exe with an elevation manifest, so it gets a single clean
+// UAC prompt, proper DPI scaling, and reliable foreground — none of the console
+// flashing / encoding fragility of the PowerShell version.
+
+using System;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+
+namespace ExtendedDisplay
+{
+    static class Native
+    {
+        [DllImport("user32.dll")]
+        public static extern int SetDisplayConfig(uint n, IntPtr p, uint m, IntPtr q, uint flags);
+
+        public const uint SDC_APPLY = 0x80;
+        public const uint SDC_TOPOLOGY_INTERNAL = 0x01;
+        public const uint SDC_TOPOLOGY_EXTEND = 0x04;
+
+    }
+
+    public class MainForm : Form
+    {
+        const string VddInstanceId = @"ROOT\DISPLAY\0000";
+
+        RadioButton rbUsb, rbWifi;
+        RadioButton rbBestRes, rbBalanced, rbSmooth;
+        CheckBox chkUdp, chkTouch, chkHevc, chkHdr, chkEncrypt, chkAudio, chkMute;
+        TextBox txtIp;
+        NumericUpDown numDelay;
+        Button btnStart, btnStop;
+        Label lblStatus, lblCode;
+        LinkLabel lnkNewCode;
+        ToolTip tip;
+        string pairCode = "";
+        Process sender;
+        string exePath;
+        string liveFps = "";
+        string liveState = "";
+        string liveMode = "";
+
+        public MainForm()
+        {
+            exePath = ResolveSenderPath();
+
+            Text = "Extended Display";
+            ClientSize = new Size(400, 544);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            StartPosition = FormStartPosition.CenterScreen;
+            Font = new Font("Segoe UI", 9.5f);
+            BackColor = Color.White;
+
+            tip = new ToolTip { AutoPopDelay = 30000, InitialDelay = 350, ReshowDelay = 100, ShowAlways = true };
+
+            // ── Connection ────────────────────────────────────────────────
+            var grpConn = new GroupBox { Text = "Connection", Location = new Point(12, 10), Size = new Size(376, 96) };
+            rbUsb = new RadioButton { Text = "USB  (auto-detect)", Location = new Point(12, 24), AutoSize = true, Checked = true };
+            rbWifi = new RadioButton { Text = "Wi-Fi", Location = new Point(12, 50), AutoSize = true };
+            var lblIp = new Label { Text = "IP (optional):", Location = new Point(92, 52), AutoSize = true };
+            txtIp = new TextBox { Location = new Point(180, 49), Width = 118, Enabled = false, Text = "" };
+            tip.SetToolTip(txtIp, Wrap("Optional. Enter the tablet's IP if auto-discovery fails (guest / AP-isolated networks). Leave blank to auto-find it on the LAN."));
+            chkUdp = new CheckBox { Text = "Low-latency UDP", Location = new Point(30, 72), AutoSize = true, Enabled = false };
+            var iUdp = Info(72, "Send video over UDP for lower latency on Wi-Fi. Helps on lossy / high-latency links; on a good 5 GHz link, plain TCP is usually smoother.", chkUdp);
+            rbWifi.CheckedChanged += (s, e) => { chkUdp.Enabled = rbWifi.Checked; txtIp.Enabled = rbWifi.Checked; };
+            grpConn.Controls.AddRange(new Control[] { rbUsb, rbWifi, lblIp, txtIp, chkUdp, iUdp });
+
+            // ── Quality ───────────────────────────────────────────────────
+            // One preset instead of FPS / encoder / bitrate knobs — each maps to
+            // proven values (the encoder always uses the auto-ladder). Fine-grained
+            // control stays on the CLI (--fps / --bitrate / --encoder).
+            var grpVid = new GroupBox { Text = "Quality", Location = new Point(12, 114), Size = new Size(376, 100) };
+            rbBestRes = new RadioButton { Text = "Best resolution", Location = new Point(12, 22), AutoSize = true };
+            var iBestRes = Info(22, "Sharpest picture - native 2960x1848 at 60 fps with a higher 40 Mbps bitrate. Best for reading / documents / coding. Prefers USB or strong 5 GHz Wi-Fi.", rbBestRes);
+            rbBalanced = new RadioButton { Text = "Balanced  (recommended)", Location = new Point(12, 48), AutoSize = true, Checked = true };
+            var iBalanced = Info(48, "Native 2960x1848 at 60 fps, 25 Mbps - the proven default. Right for almost everything.", rbBalanced);
+            rbSmooth = new RadioButton { Text = "Smooth motion  (120 fps)", Location = new Point(12, 74), AutoSize = true };
+            var iSmooth = Info(74, "Silkiest cursor / scrolling / gaming feel - 120 fps with the virtual display at 1920x1200 (the tablet upscales).", rbSmooth);
+            grpVid.Controls.AddRange(new Control[] { rbBestRes, iBestRes, rbBalanced, iBalanced, rbSmooth, iSmooth });
+
+            // ── Options ───────────────────────────────────────────────────
+            // Short labels; the full description is on the ⓘ (and on hover of the row).
+            var grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(376, 214) };
+            chkTouch = new CheckBox { Text = "Touch input", Location = new Point(12, 24), AutoSize = true, Checked = true };
+            var iTouch = Info(24, "Tablet touches control the PC - tap = click, drag = move / scroll, long-press = right-click. S Pen pressure & hover work too.", chkTouch);
+            chkHevc = new CheckBox { Text = "HEVC / H.265", Location = new Point(12, 50), AutoSize = true };
+            var iHevc = Info(50, "H.265 - better compression, so motion (video playback, scrolling) looks cleaner at the same bitrate. Barely visible on a static desktop; tick it mainly for watching video. Needs tablet HEVC decode (the S9 Ultra has it).", chkHevc);
+            chkHdr = new CheckBox { Text = "HDR", Location = new Point(12, 76), AutoSize = true };
+            var iHdr = Info(76, "Experimental - for HDR video content only. The normal SDR desktop looks washed out, so leave this OFF for general use.", chkHdr);
+            chkAudio = new CheckBox { Text = "Desktop audio", Location = new Point(12, 102), AutoSize = true };
+            var iAudio = Info(102, "Play the PC's sound on the tablet over the same link (no extra driver needed).", chkAudio);
+            chkMute = new CheckBox { Text = "› Mute PC speakers", Location = new Point(30, 128), AutoSize = true, Enabled = false };
+            var iMute = Info(128, "Sound plays only on the tablet; the PC's own speakers stay silent while streaming (restored when you Stop).", chkMute);
+            var lblDelay = new Label { Text = "› A/V sync delay (ms):", Location = new Point(30, 157), AutoSize = true, Enabled = false };
+            numDelay = new NumericUpDown { Location = new Point(180, 154), Width = 62, Minimum = 20, Maximum = 500, Value = 40, Increment = 5, Enabled = false };
+            var iDelay = Info(157, "Audio delay for lip-sync (ms). Higher = audio plays later; lower it if audio lags the video. ~40 matches the tablet's own video; ~20 for watching the laptop with the tablet as a speaker.", numDelay);
+            chkAudio.CheckedChanged += (s, e) => {
+                chkMute.Enabled = chkAudio.Checked; numDelay.Enabled = chkAudio.Checked;
+                lblDelay.Enabled = chkAudio.Checked;
+                // The i markers stay enabled: tooltips never show over disabled
+                // controls, and the descriptions should be readable before enabling.
+                if (!chkAudio.Checked) chkMute.Checked = false;
+            };
+            chkEncrypt = new CheckBox { Text = "Encrypt", Location = new Point(12, 184), AutoSize = true };
+            var iEnc = Info(184, "Require a pairing code (shown below) on the tablet. Encrypts video, touch and audio with AES-256 - use it on untrusted Wi-Fi. The code is remembered on both sides, so you type it on the tablet only once; click 'new code' to rotate it.", chkEncrypt);
+            chkEncrypt.CheckedChanged += OnEncryptToggled;
+            grpOpt.Controls.AddRange(new Control[] {
+                chkTouch, iTouch, chkHevc, iHevc, chkHdr, iHdr, chkAudio, iAudio,
+                chkMute, iMute, lblDelay, numDelay, iDelay, chkEncrypt, iEnc });
+
+            // ── Pairing code + status + buttons ───────────────────────────
+            lblCode = new Label { Text = "", Location = new Point(14, 442), Size = new Size(290, 22), ForeColor = Color.MediumBlue, Font = new Font("Consolas", 11f, FontStyle.Bold) };
+            lnkNewCode = new LinkLabel { Text = "new code", Location = new Point(310, 444), AutoSize = true, Visible = false };
+            lnkNewCode.Click += OnNewCode;
+            tip.SetToolTip(lnkNewCode, Wrap("Generate a fresh pairing code (rotates the key). Enter the new code on the tablet on the next Start."));
+            lblStatus = new Label { Text = "Ready.", Location = new Point(14, 466), Size = new Size(374, 20), ForeColor = Color.DimGray, AutoEllipsis = true };
+            btnStart = new Button { Text = "Start Streaming", Location = new Point(12, 494), Size = new Size(182, 38), BackColor = Color.FromArgb(0, 120, 212), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            btnStart.FlatAppearance.BorderSize = 0;
+            btnStop = new Button { Text = "Stop", Location = new Point(206, 494), Size = new Size(182, 38), Enabled = false };
+            btnStart.Click += OnStart;
+            btnStop.Click += OnStop;
+
+            Controls.AddRange(new Control[] { grpConn, grpVid, grpOpt, lblCode, lnkNewCode, lblStatus, btnStart, btnStop });
+
+            FormClosing += (s, e) => { StopSender(); DisableVdd(); };
+
+            if (!File.Exists(exePath))
+                SetStatus("WARNING: sender not found at " + exePath, Color.Firebrick);
+        }
+
+        // WinForms tooltips don't word-wrap on their own — long descriptions render
+        // as one endless line. Break at word boundaries every ~52 chars instead.
+        static string Wrap(string text)
+        {
+            const int width = 52;
+            var sb = new System.Text.StringBuilder();
+            int lineLen = 0;
+            foreach (string word in text.Split(' '))
+            {
+                if (lineLen > 0 && lineLen + 1 + word.Length > width)
+                {
+                    sb.Append("\r\n");
+                    lineLen = 0;
+                }
+                else if (lineLen > 0)
+                {
+                    sb.Append(' ');
+                    lineLen++;
+                }
+                sb.Append(word);
+                lineLen += word.Length;
+            }
+            return sb.ToString();
+        }
+
+        // A small blue ⓘ marker at the right edge of a row. The full description is a
+        // tooltip on the marker and on any related controls (so hovering the row works).
+        Label Info(int y, string text, params Control[] related)
+        {
+            var l = new Label
+            {
+                Text = "ⓘ",   // circled 'i' info glyph
+                Location = new Point(350, y),
+                AutoSize = true,
+                ForeColor = Color.FromArgb(0, 120, 212),
+                Cursor = Cursors.Hand,
+                Font = new Font("Segoe UI", 10.5f)
+            };
+            string wrapped = Wrap(text);
+            tip.SetToolTip(l, wrapped);
+            foreach (var c in related) tip.SetToolTip(c, wrapped);
+            return l;
+        }
+
+        string ResolveSenderPath()
+        {
+            // Packaged: the sender sits beside this launcher. Dev tree: the launcher
+            // may run from windows-sender\launcher\ (sender in ..\build\Release) or
+            // from windows-sender\build\Release\ (sender beside it). Try each.
+            string bd = AppDomain.CurrentDomain.BaseDirectory;
+            string[] candidates =
+            {
+                Path.Combine(bd, "ExtendedDisplaySender.exe"),
+                Path.Combine(bd, @"..\build\Release\ExtendedDisplaySender.exe"),
+                Path.Combine(bd, @"..\..\build\Release\ExtendedDisplaySender.exe"),
+            };
+            foreach (var c in candidates)
+            {
+                string full = Path.GetFullPath(c);
+                if (File.Exists(full)) return full;
+            }
+            return Path.GetFullPath(candidates[0]);
+        }
+
+        void SetStatus(string msg, Color color)
+        {
+            lblStatus.Text = msg;
+            lblStatus.ForeColor = color;
+            lblStatus.Refresh();
+        }
+
+        void RunHidden(string file, string args)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = file,
+                Arguments = args,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            try { using (var p = Process.Start(psi)) { p.WaitForExit(15000); } } catch { }
+        }
+
+        void EnableVdd()
+        {
+            RunHidden("powershell.exe",
+                "-NoProfile -ExecutionPolicy Bypass -Command \"Enable-PnpDevice -InstanceId '" + VddInstanceId + "' -Confirm:$false -EA SilentlyContinue\"");
+            System.Threading.Thread.Sleep(2000);
+            Native.SetDisplayConfig(0, IntPtr.Zero, 0, IntPtr.Zero, Native.SDC_APPLY | Native.SDC_TOPOLOGY_EXTEND);
+        }
+
+        // Disable ONLY the VDD device. Windows removes its extended area from the
+        // desktop automatically; real monitors are untouched (unlike a topology
+        // change to INTERNAL, which would also collapse real external displays).
+        void DisableVddDevice()
+        {
+            RunHidden("powershell.exe",
+                "-NoProfile -ExecutionPolicy Bypass -Command \"Disable-PnpDevice -InstanceId '" + VddInstanceId + "' -Confirm:$false -EA SilentlyContinue\"");
+        }
+
+        void DisableVdd()
+        {
+            // Device-only disable removes just the VDD; real external monitors are
+            // untouched. (A SDC_TOPOLOGY_INTERNAL collapse would force the laptop
+            // panel and drop any real second monitor.)
+            DisableVddDevice();
+        }
+
+        // On open, clear any leftover virtual display from a previous crash or
+        // force-kill (which skip the normal Stop cleanup). Device-only, so it
+        // never disturbs real monitors. Start is disabled until this finishes to
+        // avoid racing an enable against the disable.
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            btnStart.Enabled = false;
+            SetStatus("Checking for a leftover virtual display...", Color.DimGray);
+            var worker = new System.ComponentModel.BackgroundWorker();
+            worker.DoWork += (s, ev) => { try { DisableVddDevice(); } catch { } };
+            worker.RunWorkerCompleted += (s, ev) =>
+            {
+                if (!btnStop.Enabled) { btnStart.Enabled = true; SetStatus("Ready.", Color.DimGray); }
+            };
+            worker.RunWorkerAsync();
+        }
+
+        // Ticking Encrypt shows the pairing code. The code persists across launches
+        // (and the tablet stores the derived key), so it is typed on the tablet
+        // ONCE — "new code" rotates it when you want to re-key.
+        void OnEncryptToggled(object s, EventArgs e)
+        {
+            if (chkEncrypt.Checked)
+            {
+                if (pairCode.Length == 0) pairCode = LoadCode();
+                if (pairCode.Length == 0) { pairCode = GenerateCode(); SaveCode(pairCode); }
+                lblCode.Text = "Pairing code:   " + pairCode;
+                lnkNewCode.Visible = true;
+            }
+            else { lblCode.Text = ""; lnkNewCode.Visible = false; }
+        }
+
+        void OnNewCode(object s, EventArgs e)
+        {
+            pairCode = GenerateCode();
+            SaveCode(pairCode);
+            lblCode.Text = "Pairing code:   " + pairCode;
+            SetStatus("New code - enter it on the tablet on the next Start.", Color.DimGray);
+        }
+
+        // The code is remembered so pairing is one-time. Stored per-user under
+        // LOCALAPPDATA (same place as the encoder cache); rotate via "new code".
+        static string CodePath()
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ExtendedDisplay");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "pairing.code");
+        }
+
+        static string LoadCode()
+        {
+            try
+            {
+                if (File.Exists(CodePath()))
+                {
+                    string code = File.ReadAllText(CodePath()).Trim();
+                    if (code.Length == 8) return code;
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        static void SaveCode(string code)
+        {
+            try { File.WriteAllText(CodePath(), code); } catch { }
+        }
+
+        // 8-char code from an unambiguous alphabet (no I/O/0/1), crypto-random.
+        static string GenerateCode()
+        {
+            const string abc = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+            var bytes = new byte[8];
+            using (var rng = System.Security.Cryptography.RandomNumberGenerator.Create()) rng.GetBytes(bytes);
+            var chars = new char[8];
+            for (int i = 0; i < 8; i++) chars[i] = abc[bytes[i] % abc.Length];
+            return new string(chars);
+        }
+
+        void OnStart(object src, EventArgs e)
+        {
+            if (!File.Exists(exePath)) { SetStatus("Sender exe not found.", Color.Firebrick); return; }
+            if (chkEncrypt.Checked && pairCode.Length == 0)
+            {
+                pairCode = GenerateCode(); SaveCode(pairCode);
+                lblCode.Text = "Pairing code:   " + pairCode;
+            }
+
+            SetStatus("Enabling virtual display...", Color.DimGray);
+            btnStart.Enabled = false;
+            EnableVdd();
+
+            var sb = new System.Text.StringBuilder();
+            if (rbWifi.Checked)
+            {
+                string ip = txtIp.Text.Trim();
+                // A manual IP connects directly (skips discovery broadcast); empty
+                // falls back to auto-discovery on the LAN.
+                if (ip.Length > 0) sb.Append(" --host " + ip);
+                else sb.Append(" --wifi");
+            }
+            // Encryption now works on both transports (the sender encrypts NALs for
+            // UDP and length-prefixed TCP), so honour the user's UDP choice directly —
+            // no need to force UDP when encrypting. TCP stays smoother on good Wi-Fi.
+            if (chkUdp.Checked && chkUdp.Enabled) sb.Append(" --udp");
+            if (chkHdr.Checked) sb.Append(" --hdr");
+            else if (chkHevc.Checked) sb.Append(" --hevc");
+            if (!chkTouch.Checked) sb.Append(" --no-touch");
+            if (chkAudio.Checked) sb.Append(" --audio");
+            if (chkAudio.Checked) sb.Append(" --audio-delay-ms " + (int)numDelay.Value);
+            if (chkMute.Checked && chkMute.Enabled) sb.Append(" --mute-local");
+            // Quality preset -> flags. Balanced = the sender's defaults (60 fps,
+            // 25 Mbps, auto encoder), so it adds nothing.
+            if (rbBestRes.Checked) sb.Append(" --bitrate 40000");
+            if (rbSmooth.Checked) sb.Append(" --fps 120");
+
+            try
+            {
+                liveFps = ""; liveState = "Starting";
+                liveMode = rbWifi.Checked ? (chkUdp.Checked ? "Wi-Fi UDP" : "Wi-Fi") : "USB";
+                var psi = new ProcessStartInfo
+                {
+                    FileName = exePath,
+                    Arguments = sb.ToString(),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                // Pass the pairing code out-of-band (env, not argv) so it never shows
+                // in a process listing. The sender derives the key and encrypts.
+                if (chkEncrypt.Checked && pairCode.Length > 0)
+                    psi.EnvironmentVariables["EXTDISPLAY_KEY"] = pairCode;
+                sender = Process.Start(psi);
+                sender.EnableRaisingEvents = true;
+                // The sender's own messages (stdout) and ffmpeg's -stats (stderr)
+                // both flow here; we parse them for a live status line.
+                sender.OutputDataReceived += (s2, ev) => { if (ev.Data != null) OnSenderLine(ev.Data); };
+                sender.ErrorDataReceived  += (s2, ev) => { if (ev.Data != null) OnSenderLine(ev.Data); };
+                sender.BeginOutputReadLine();
+                sender.BeginErrorReadLine();
+                sender.Exited += (s2, e2) =>
+                {
+                    // Fires on a threadpool thread; during close the handle may be
+                    // gone — guard like OnSenderLine or BeginInvoke throws and the
+                    // unhandled exception kills the process.
+                    try
+                    {
+                        if (!IsHandleCreated || IsDisposed) return;
+                        BeginInvoke((Action)(() =>
+                        {
+                            if (btnStop.Enabled)
+                            {
+                                SetStatus("Sender exited.", Color.DimGray);
+                                btnStart.Enabled = true;
+                                btnStop.Enabled = false;
+                                DisableVdd();  // don't leave a ghost display with Stop greyed out
+                            }
+                        }));
+                    }
+                    catch (InvalidOperationException) { /* form torn down mid-notify */ }
+                };
+                SetStatus("Starting…  (" + liveMode + ")", Color.Green);
+                btnStop.Enabled = true;
+            }
+            catch (Exception ex)
+            {
+                SetStatus("Failed: " + ex.Message, Color.Firebrick);
+                btnStart.Enabled = true;
+                DisableVdd();
+            }
+        }
+
+        // Parse a line from the sender / ffmpeg into a live status. ffmpeg's -stats
+        // gives "fps=NN"; the sender's own messages give the connection state.
+        void OnSenderLine(string line)
+        {
+            var m = Regex.Match(line, @"fps=\s*([\d.]+)");
+            if (m.Success && m.Groups[1].Value != "0" && m.Groups[1].Value != "0.0")
+                liveFps = m.Groups[1].Value;
+
+            if (Regex.IsMatch(line, "Reconnecting|Stream ended", RegexOptions.IgnoreCase))
+                { liveState = "Reconnecting"; liveFps = ""; }
+            else if (Regex.IsMatch(line, "Searching|No tablet found", RegexOptions.IgnoreCase))
+                liveState = "Searching";
+            else if (Regex.IsMatch(line, @"Streaming .*(over|with)|Tablet found|Tablet connected|Extended display:", RegexOptions.IgnoreCase))
+                liveState = "Streaming";
+
+            string text;
+            Color color;
+            switch (liveState)
+            {
+                case "Streaming":
+                    text = "Streaming  •  " + liveMode + (liveFps.Length > 0 ? "  •  " + liveFps + " fps" : "");
+                    color = Color.Green; break;
+                case "Reconnecting":
+                    text = "Reconnecting…  (" + liveMode + ")"; color = Color.DarkOrange; break;
+                case "Searching":
+                    text = "Searching for tablet…  (" + liveMode + ")"; color = Color.DarkOrange; break;
+                default:
+                    text = "Starting…  (" + liveMode + ")"; color = Color.DimGray; break;
+            }
+            try
+            {
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke((Action)(() => { if (btnStop.Enabled) SetStatus(text, color); }));
+            }
+            catch { }
+        }
+
+        void StopSender()
+        {
+            try { if (sender != null && !sender.HasExited) { sender.Kill(); sender.WaitForExit(4000); } } catch { }
+            sender = null;
+            liveState = ""; liveFps = "";
+        }
+
+        void OnStop(object sender2, EventArgs e)
+        {
+            SetStatus("Stopping...", Color.DimGray);
+            btnStop.Enabled = false;
+            StopSender();
+            DisableVdd();
+            SetStatus("Stopped - virtual display hidden.", Color.DimGray);
+            btnStart.Enabled = true;
+        }
+
+        [STAThread]
+        static void Main()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new MainForm());
+        }
+    }
+}
