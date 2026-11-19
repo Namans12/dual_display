@@ -63,6 +63,22 @@ private const val INITIAL_HEIGHT = 240
 private const val STATUS_LINGER_MS = 2500L
 private const val MIME_AVC = "video/avc"
 private const val MIME_HEVC = "video/hevc"
+// Pairing codes: 8 characters from an alphabet without the look-alikes I, O, 0, 1
+// (the same alphabet both hosts generate from).
+private const val CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+private const val CODE_LENGTH = 8
+// Why the pairing prompt is being asked for.
+private const val PAIR_NEEDS_CODE = 1    // encrypted stream, no key on this tablet
+private const val PAIR_WRONG_SAVED = 2   // encrypted stream, the saved key does not open it
+// After the prompt is dismissed with Back it stays away this long.
+private const val PAIR_SNOOZE_MS = 30_000L
+
+/** True if [b] begins with an Annex-B start code (00 00 01 / 00 00 00 01), i.e. it
+ *  is a plaintext NAL. A sealed blob begins with its nonce, whose first byte is the
+ *  sender's video domain byte 0x01, so it can never look like one. */
+private fun startsWithStartCode(b: ByteArray): Boolean =
+    b.size >= 4 && b[0] == 0.toByte() && b[1] == 0.toByte() &&
+        (b[2] == 1.toByte() || (b[2] == 0.toByte() && b[3] == 1.toByte()))
 
 /** PBKDF2-HMAC-SHA256 (matches the Windows sender) + AES-256-GCM. */
 private object Crypto {
@@ -117,8 +133,20 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     // picture. Without it the last decoded frame stayed on screen after the host
     // stopped, looking like a frozen desktop.
     private lateinit var idleCover: View
+    // Pairing prompt: a centred card over a dimmed screen. Hidden unless an
+    // encrypted stream has arrived that this tablet cannot open.
+    private lateinit var pairOverlay: FrameLayout
+    private lateinit var pairReason: TextView
     private lateinit var pairInput: EditText
-    private lateinit var pairPanel: LinearLayout
+    private lateinit var pairMessage: TextView
+    private lateinit var pairFieldBg: GradientDrawable
+    // The sealed frame that triggered the prompt. A typed code is checked against
+    // it on the spot, so a wrong code is reported at once and never saved.
+    private var pairProbe: ByteArray? = null
+    private var pairChecking = false
+    private var pairShowsError = false
+    private var pairSnoozedUntil = 0L
+    private val dismissPairPrompt = Runnable { hidePairPrompt() }
     private var receiver: H264TcpReceiver? = null
     private val touchUplink = TouchUplink()
     private val audioReceiver = AudioReceiver()
@@ -143,6 +171,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         statusView.removeCallbacks(hideStatus)
         idleCover.visibility = if (showing) View.GONE else View.VISIBLE
         if (showing) {
+            // A picture means no code is needed (plaintext, or the key works).
+            if (!pairChecking) hidePairPrompt()
             statusView.postDelayed(hideStatus, STATUS_LINGER_MS)
         } else {
             statusView.visibility = View.VISIBLE
@@ -184,61 +214,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             setBackgroundColor(0x99000000.toInt())
             textSize = 14f
             setPadding(18, 10, 18, 10)
+            // Long-press: forget the saved pairing code (after a confirmation).
+            setOnLongClickListener { confirmForgetPairing(); true }
         }
 
-        // Pairing panel: if the PC shows a pairing code (encryption on), type it here
-        // once. Leave it be for an open/trusted LAN. A boxed, monospaced, letter-
-        // spaced field reads like separate blocks and shows every character clearly.
-        val pairTitle = TextView(this).apply {
-            text = if (pairingKey != null) "Paired earlier - type a new code to re-pair"
-                   else "Pairing code (from PC)"
-            setTextColor(0xFFDDDDDD.toInt())
-            textSize = 13f
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 8)
-        }
-        val boxBg = GradientDrawable().apply {
-            setColor(0xEE1A1A1A.toInt())
-            cornerRadius = 14f
-            setStroke(2, 0xFF3A6EA5.toInt())
-        }
-        pairInput = EditText(this).apply {
-            hint = "--------"
-            setTextColor(0xFFFFFFFF.toInt())
-            setHintTextColor(0xFF555555.toInt())
-            background = boxBg
-            setPadding(28, 16, 28, 16)
-            textSize = 26f
-            typeface = Typeface.MONOSPACE
-            letterSpacing = 0.5f
-            gravity = Gravity.CENTER
-            isSingleLine = true
-            filters = arrayOf(InputFilter.LengthFilter(8), InputFilter.AllCaps())
-            inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or
-                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            imeOptions = EditorInfo.IME_ACTION_DONE
-            setOnEditorActionListener { _, actionId, _ ->
-                if (actionId == EditorInfo.IME_ACTION_DONE) { applyPairingCode(text.toString().trim()); true }
-                else false
-            }
-            // Codes are exactly 8 chars. Auto-apply once full, but DEFER via post{}
-            // so the 8th character actually draws before the panel reacts (the old
-            // synchronous hide made the last char "not show" while it still paired).
-            addTextChangedListener(object : TextWatcher {
-                override fun afterTextChanged(s: Editable?) {
-                    if ((s?.length ?: 0) == 8) { val c = s.toString(); post { applyPairingCode(c) } }
-                }
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, cc: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, cc: Int) {}
-            })
-        }
-        pairPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            addView(pairTitle)
-            addView(pairInput, LinearLayout.LayoutParams(360, LinearLayout.LayoutParams.WRAP_CONTENT))
-        }
+        pairOverlay = buildPairPrompt()
 
         idleCover = View(this).apply { setBackgroundColor(0xFF000000.toInt()) }
 
@@ -248,7 +228,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             ))
-            // Above the video, below the status label and pairing box.
+            // Above the video, below the status label and pairing prompt.
             addView(idleCover, FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -261,57 +241,272 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 leftMargin = 18
                 topMargin = 18
             })
-            addView(pairPanel, FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            ).apply {
-                topMargin = 24
-            })
+            addView(pairOverlay, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ))
         }
 
         setContentView(rootLayout)
-        // Don't let the pairing field grab focus on launch (that popped the keyboard
-        // and blocked the screen). It only takes focus when the user taps it.
+        // Nothing takes focus on launch (no keyboard); the pairing field only gets
+        // it when the prompt is shown.
         rootLayout.isFocusableInTouchMode = true
+        // The root covers the whole screen; once the window leaves touch mode (a
+        // hardware keyboard, or key events) Android would draw its default focus
+        // highlight over it, i.e. a grey wash over the picture and the black cover.
+        rootLayout.defaultFocusHighlightEnabled = false
         rootLayout.requestFocus()
         hideSystemUi()
         Log.i(TAG, "onCreate done; touch capture via dispatchTouchEvent is active")
     }
 
-    // Derive the shared key from the PC's pairing code and encrypt the uplink.
-    // Empty code = open/plaintext (trusted LAN).
-    private fun applyPairingCode(code: String) {
-        if (code.isEmpty()) {
-            pairingKey = null
-            touchUplink.setKey(null)
-            audioReceiver.setKey(null)
-            receiver?.setKey(null)
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
+
+    // ------------------------------------------------------------ pairing prompt
+    //
+    // Shown only when it is needed: an encrypted stream has arrived and this tablet
+    // has no key, or its saved key does not open it. A plaintext session, or a
+    // saved key that works, never shows it.
+
+    private fun buildPairPrompt(): FrameLayout {
+        val title = TextView(this).apply {
+            text = "Enter the 8-character code shown on your computer"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 22f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        pairReason = TextView(this).apply {
+            setTextColor(0xFFB8B8C0.toInt())
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, dp(20))
+        }
+        pairFieldBg = GradientDrawable().apply {
+            setColor(0xFF0E0E12.toInt())
+            cornerRadius = dp(14).toFloat()
+            setStroke(dp(2), 0xFF4C8DD6.toInt())
+        }
+        // Only characters a code can contain get in; lower case is accepted and
+        // shown as upper case.
+        val codeFilter = InputFilter { src, start, end, _, _, _ ->
+            val kept = StringBuilder(end - start)
+            for (i in start until end) {
+                val c = src[i].uppercaseChar()
+                if (CODE_ALPHABET.indexOf(c) >= 0) kept.append(c)
+            }
+            if (kept.length < end - start) {
+                setPairMessage("Codes use A–Z and 2–9, never I, O, 0 or 1.", 0xFFE0B050.toInt())
+                pairShowsError = true
+            }
+            kept.toString()
+        }
+        pairInput = EditText(this).apply {
+            hint = "--------"
+            setTextColor(0xFFFFFFFF.toInt())
+            setHintTextColor(0xFF4A4A52.toInt())
+            background = pairFieldBg
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            textSize = 44f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            letterSpacing = 0.3f
+            gravity = Gravity.CENTER
+            isSingleLine = true
+            filters = arrayOf(codeFilter, InputFilter.LengthFilter(CODE_LENGTH))
+            // "Visible password" turns off prediction/autocorrect, which would
+            // otherwise rewrite a code as it is typed.
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
+                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE) { submitPairingCode(text.toString()); true }
+                else false
+            }
+            // The code is checked as soon as the 8th character is in. Deferred via
+            // post{} so that character is drawn before the field reacts.
+            addTextChangedListener(object : TextWatcher {
+                override fun afterTextChanged(s: Editable?) {
+                    val n = s?.length ?: 0
+                    if (n == CODE_LENGTH) { val c = s.toString(); post { submitPairingCode(c) } }
+                }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, cc: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, cc: Int) {
+                    // Typing again clears the last error (not the one the filter
+                    // just raised for this very keystroke: that adds no character).
+                    if (pairShowsError && cc > 0 && !pairChecking) {
+                        pairShowsError = false
+                        setPairMessage("", 0)
+                        pairFieldBg.setStroke(dp(2), 0xFF4C8DD6.toInt())
+                    }
+                }
+            })
+        }
+        pairMessage = TextView(this).apply {
+            textSize = 16f
+            gravity = Gravity.CENTER
+            minHeight = dp(26)
+            setPadding(0, dp(14), 0, 0)
+        }
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(32), dp(28), dp(32), dp(24))
+            background = GradientDrawable().apply {
+                setColor(0xFF1C1C22.toInt())
+                cornerRadius = dp(22).toFloat()
+                setStroke(dp(1), 0xFF3A3A44.toInt())
+            }
+            isClickable = true  // taps on the card are not "outside" taps
+            addView(title)
+            addView(pairReason)
+            addView(pairInput, LinearLayout.LayoutParams(dp(420), LinearLayout.LayoutParams.WRAP_CONTENT))
+            addView(pairMessage)
+        }
+        return FrameLayout(this).apply {
+            setBackgroundColor(0xB3000000.toInt())
+            visibility = View.GONE
+            isClickable = true  // swallow touches: nothing behind the prompt is usable
+            // Horizontally centred, in the upper part of the screen so the on-screen
+            // keyboard does not cover it.
+            addView(card, FrameLayout.LayoutParams(
+                dp(560), FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            ).apply { topMargin = dp(72) })
+        }
+    }
+
+    private fun setPairMessage(text: String, color: Int) {
+        pairMessage.text = text
+        if (color != 0) pairMessage.setTextColor(color)
+    }
+
+    private fun pairPromptVisible() = ::pairOverlay.isInitialized && pairOverlay.visibility == View.VISIBLE
+
+    private fun inputMethod() =
+        getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+
+    /** Called (on the UI thread) when an encrypted stream arrived that the current
+     *  key cannot open. [probe] is one sealed frame of that stream. */
+    private fun showPairPrompt(reason: Int, probe: ByteArray) {
+        // A report that raced a successful pairing: the key we hold opens it.
+        pairingKey?.let { if (Sealer(it).open(probe, 0, probe.size) != null) return }
+        pairProbe = probe
+        if (pairChecking) return
+        pairReason.text = if (reason == PAIR_WRONG_SAVED)
+            "The code saved on this tablet does not match this computer."
+        else
+            "This computer encrypts the picture, so the tablet needs its code once."
+        if (pairPromptVisible()) return                       // keep what is being typed
+        if (android.os.SystemClock.uptimeMillis() < pairSnoozedUntil) return
+        pairOverlay.removeCallbacks(dismissPairPrompt)
+        pairShowsError = false
+        setPairMessage("", 0)
+        pairFieldBg.setStroke(dp(2), 0xFF4C8DD6.toInt())
+        pairInput.setTextColor(0xFFFFFFFF.toInt())
+        pairInput.isEnabled = true
+        pairInput.setText("")
+        pairOverlay.visibility = View.VISIBLE
+        pairInput.requestFocus()
+        pairInput.post { inputMethod().showSoftInput(pairInput, 0) }
+        Log.i(TAG, "Pairing prompt shown (${if (reason == PAIR_WRONG_SAVED) "saved key does not match" else "no key"})")
+    }
+
+    private fun hidePairPrompt() {
+        if (!pairPromptVisible()) return
+        pairOverlay.removeCallbacks(dismissPairPrompt)
+        pairOverlay.visibility = View.GONE
+        inputMethod().hideSoftInputFromWindow(pairInput.windowToken, 0)
+        rootLayout.requestFocus()
+        hideSystemUi()
+    }
+
+    // Derives the key from the typed code (same KDF as both hosts) and checks it
+    // against the sealed frame that raised the prompt. Only a code that opens that
+    // frame is adopted and saved, so a wrong code gets an answer at once and never
+    // replaces a working saved key.
+    private fun submitPairingCode(code: String) {
+        if (pairChecking || !pairPromptVisible() || code.length != CODE_LENGTH) return
+        val probe = pairProbe ?: return
+        pairChecking = true
+        pairInput.isEnabled = false
+        setPairMessage("Checking…", 0xFFB8B8C0.toInt())
+        thread(name = "pair-check") {
+            val key = try { Crypto.deriveKey(code) } catch (_: Exception) { null }
+            val ok = key != null && Sealer(key).open(probe, 0, probe.size) != null
+            runOnUiThread { onPairingChecked(if (ok) key else null) }
+        }
+    }
+
+    private fun onPairingChecked(key: ByteArray?) {
+        pairChecking = false
+        if (key == null) {
+            Log.i(TAG, "Pairing: the entered code does not match the stream")
+            pairShowsError = true
+            setPairMessage("That code doesn't match. Check it on your computer and try again.",
+                0xFFFF6B6B.toInt())
+            pairFieldBg.setStroke(dp(2), 0xFFFF6B6B.toInt())
+            pairInput.isEnabled = true
+            pairInput.setText("")
+            pairInput.requestFocus()
+            pairInput.post { inputMethod().showSoftInput(pairInput, 0) }
             return
         }
-        if (code.length != 8) return  // wait until the full code is entered
-        try {
-            val key = Crypto.deriveKey(code)
-            pairingKey = key
-            touchUplink.setKey(key)     // touch encrypts per-packet (reads key live)
-            audioReceiver.setKey(key)   // audio decrypts per-frame (reads key live)
-            receiver?.setKey(key)       // video decrypts per-frame (drained until now)
-            // Remember the derived key so the code never has to be typed again
-            // (typing a new code later simply overwrites it).
-            getSharedPreferences("pairing", MODE_PRIVATE).edit()
-                .putString("key_b64", android.util.Base64.encodeToString(key, android.util.Base64.NO_WRAP))
-                .apply()
-            Log.i(TAG, "Paired: encryption enabled (key ${Crypto.hex(key).take(8)}…)")
-            showStatus("Paired — link encrypted")
-            // Show the completed code (green), then tuck the panel away — deferred so
-            // the final character is visible before it disappears.
-            pairInput.isEnabled = false
-            pairInput.setTextColor(0xFF66DD88.toInt())
-            pairPanel.postDelayed({ pairPanel.visibility = View.GONE; hideSystemUi() }, 700)
-            Toast.makeText(this, "Paired — link encrypted", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Log.i(TAG, "Pairing failed: ${e.message}")
-            Toast.makeText(this, "Pairing failed: ${e.message}", Toast.LENGTH_SHORT).show()
+        pairingKey = key
+        touchUplink.setKey(key)     // touch encrypts per-packet (reads key live)
+        audioReceiver.setKey(key)   // audio decrypts per-frame (reads key live)
+        receiver?.setKey(key)       // video decrypts per-frame
+        // Remember the derived key so the code is typed once, ever.
+        getSharedPreferences("pairing", MODE_PRIVATE).edit()
+            .putString("key_b64", android.util.Base64.encodeToString(key, android.util.Base64.NO_WRAP))
+            .apply()
+        Log.i(TAG, "Paired: encryption enabled (key ${Crypto.hex(key).take(8)}…)")
+        setPairMessage("Paired", 0xFF5FD68A.toInt())
+        pairFieldBg.setStroke(dp(2), 0xFF5FD68A.toInt())
+        pairInput.setTextColor(0xFF5FD68A.toInt())
+        showStatus("Paired — waiting for the picture")
+        // Get out of the way; the host retries by itself and the picture follows.
+        pairOverlay.postDelayed(dismissPairPrompt, 900)
+    }
+
+    private fun confirmForgetPairing() {
+        if (pairingKey == null) {
+            Toast.makeText(this, "No pairing code is saved on this tablet.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Forget the saved pairing code?")
+            .setMessage("The tablet will ask for the code again the next time a computer " +
+                "streams with Encrypt on. Streaming without Encrypt is not affected.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Forget") { _, _ -> forgetPairing() }
+            .setOnDismissListener { hideSystemUi() }
+            .show()
+    }
+
+    // Really forgets: the key in use AND the saved copy. (Before, clearing the key
+    // in memory left the saved one, which came back on the next start.)
+    private fun forgetPairing() {
+        pairingKey = null
+        pairProbe = null
+        touchUplink.setKey(null)
+        audioReceiver.setKey(null)
+        receiver?.setKey(null)
+        getSharedPreferences("pairing", MODE_PRIVATE).edit().remove("key_b64").commit()
+        Log.i(TAG, "Pairing forgotten (saved key removed)")
+        showStatus("Pairing code forgotten")
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (pairPromptVisible()) {
+            // Dismiss for now; it comes back if an encrypted stream still needs it.
+            pairSnoozedUntil = android.os.SystemClock.uptimeMillis() + PAIR_SNOOZE_MS
+            hidePairPrompt()
+        } else {
+            @Suppress("DEPRECATION")
+            super.onBackPressed()
         }
     }
 
@@ -320,6 +515,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     // in particular does not always deliver touches to a listener). We still call
     // through to super so the normal view hierarchy keeps working.
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        // While the pairing prompt is up, touches are for the prompt, not the host.
+        if (pairPromptVisible()) return super.dispatchTouchEvent(event)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
                 sendPointer(event, event.actionIndex, 0)
@@ -340,7 +537,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             MotionEvent.ACTION_HOVER_EXIT -> 5
             else -> -1
         }
-        if (type >= 0) sendPointer(event, 0, type)
+        if (type >= 0 && !pairPromptVisible()) sendPointer(event, 0, type)
         return super.onGenericMotionEvent(event)
     }
 
@@ -402,13 +599,6 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     // Letterbox: size the SurfaceView to the video's aspect ratio so 16:9
     // streams aren't stretched onto the 16:10 panel.
     private fun applyVideoSize(videoWidth: Int, videoHeight: Int) {
-        // Video is decoding, so no pairing is needed (either the host is open, or we
-        // already paired and the encrypted stream is flowing). Tuck the box away so
-        // it never lingers/blocks when encryption is off.
-        if (::pairPanel.isInitialized && pairPanel.visibility != View.GONE) {
-            pairPanel.visibility = View.GONE
-            hideSystemUi()
-        }
         val screenW = rootLayout.width
         val screenH = rootLayout.height
         if (screenW == 0 || screenH == 0 || videoWidth <= 0 || videoHeight <= 0) return
@@ -444,7 +634,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             onStatus = { status -> runOnUiThread { showStatus(status) } },
             onVideoShowing = { showing -> runOnUiThread { setVideoShowing(showing) } },
             onVideoSize = { w, h -> runOnUiThread { applyVideoSize(w, h) } },
-            onEncrypted = { enc -> touchUplink.setKey(if (enc) pairingKey else null) }
+            onEncrypted = { enc ->
+                touchUplink.setKey(if (enc) pairingKey else null)
+                // A plaintext session needs no code: make sure no prompt is up.
+                if (!enc) runOnUiThread { hidePairPrompt() }
+            },
+            onPairingNeeded = { reason, probe -> runOnUiThread { showPairPrompt(reason, probe) } }
         ).also { it.setKey(pairingKey); it.start() }
     }
 
@@ -542,7 +737,11 @@ private class H264TcpReceiver(
     // Reports whether the incoming video stream is encrypted (TCP: EXVE marker;
     // UDP: first-packet latch) so the activity can match the touch channel to the
     // session — a saved key against an unencrypted sender must not seal touches.
-    private val onEncrypted: (Boolean) -> Unit = {}
+    private val onEncrypted: (Boolean) -> Unit = {},
+    // An encrypted stream arrived that cannot be opened: there is no key
+    // (PAIR_NEEDS_CODE) or the key in use fails on it (PAIR_WRONG_SAVED). The
+    // ByteArray is one sealed frame of that stream, for checking a typed code.
+    private val onPairingNeeded: (Int, ByteArray) -> Unit = { _, _ -> }
 ) {
     private val running = AtomicBoolean(false)
     private var server: ServerSocket? = null
@@ -567,6 +766,24 @@ private class H264TcpReceiver(
             videoShowing = showing
             onVideoShowing(showing)
         }
+    }
+
+    // A frame was presented by the decode session started at [generation]. Frames
+    // still queued in the decoder keep coming out for a moment after the host
+    // disconnects; without the generation check they flipped the state back to
+    // "showing" right after endTcpStream() and the frozen last frame reappeared.
+    private fun frameShown(generation: Int) = synchronized(streamGeneration) {
+        if (streamGeneration.get() == generation) setShowing(true)
+    }
+
+    /** The host's TCP stream ended: stop the decode session, drop what is left of
+     *  the stream and blank the picture. Returns true if a picture was showing. */
+    private fun endTcpStream(): Boolean = synchronized(streamGeneration) {
+        streamGeneration.incrementAndGet()
+        nalQueue.clear()
+        val wasShowing = videoShowing
+        setShowing(false)
+        wasShowing
     }
 
     /** Set the pairing key to decrypt the video, or null for plaintext. Read live
@@ -603,6 +820,7 @@ private class H264TcpReceiver(
     // TCP transport: accept a connection and feed its NALs into the queue.
     private fun tcpLoop() {
         while (running.get()) {
+            var accepted = false
             try {
                 server = ServerSocket().apply {
                     reuseAddress = true
@@ -610,6 +828,7 @@ private class H264TcpReceiver(
                     bind(InetSocketAddress(LISTEN_PORT))
                 }
                 server!!.accept().use { socket ->
+                    accepted = true
                     socket.tcpNoDelay = true
                     nalQueue.clear()  // leftovers of the previous stream
                     streamGeneration.incrementAndGet()
@@ -640,6 +859,8 @@ private class H264TcpReceiver(
                         // all on the same connection, no reconnect.
                         val inp = java.io.DataInputStream(pin)
                         val lenBuf = ByteArray(4)
+                        var opened = false     // a frame of this connection decrypted
+                        var lastAsk = 0L       // when the pairing prompt was last asked for
                         while (running.get()) {
                             inp.readFully(lenBuf)
                             val n = ((lenBuf[0].toInt() and 0xff) shl 24) or
@@ -649,8 +870,28 @@ private class H264TcpReceiver(
                             if (n <= 0 || n > (8 shl 20)) break  // sanity / desync
                             val frame = ByteArray(n)
                             inp.readFully(frame)
-                            val s = videoSealer ?: continue          // not keyed yet -> drain
-                            val nal = s.open(frame, 0, frame.size) ?: break  // wrong code / tamper
+                            val s = videoSealer
+                            if (s == null) {
+                                // Not keyed (yet, or the pairing was just forgotten):
+                                // drain, blank any picture, and ask for the code. Asked
+                                // again every few seconds in case the prompt was dismissed.
+                                val now = android.os.SystemClock.uptimeMillis()
+                                if (lastAsk == 0L || now - lastAsk >= 5000) {
+                                    lastAsk = now
+                                    endTcpStream()
+                                    onPairingNeeded(PAIR_NEEDS_CODE, frame)
+                                }
+                                continue
+                            }
+                            val nal = s.open(frame, 0, frame.size)
+                            if (nal == null) {
+                                // The first frame not opening means a different pairing
+                                // code; later on it is tampering/desync. Either way the
+                                // connection is closed (the host notices and retries).
+                                if (!opened) onPairingNeeded(PAIR_WRONG_SAVED, frame)
+                                break
+                            }
+                            opened = true
                             nalQueue.put(nal)
                         }
                     } else {
@@ -667,9 +908,10 @@ private class H264TcpReceiver(
                 if (running.get()) Thread.sleep(300)
             } finally {
                 closeServer()
-                // The picture on screen is now a frozen last frame: say so.
-                if (running.get() && videoShowing) {
-                    setShowing(false)
+                // The picture on screen is now a frozen last frame: cover it and
+                // say so. (Only after a real connection, so a failed bind does not
+                // end a UDP session.)
+                if (accepted && endTcpStream() && running.get()) {
                     onStatus("Disconnected — waiting for the computer")
                 }
             }
@@ -687,25 +929,36 @@ private class H264TcpReceiver(
                     bind(InetSocketAddress(LISTEN_PORT))
                 }
                 udpSocket = sock
-                // Session mode latch: the first reassembled blob decides. A saved key
-                // against an UNENCRYPTED sender must not blank the video (open() would
-                // reject every plaintext NAL), so on first auth-failure the session
-                // latches plaintext and passes NALs through; on first success it
-                // latches encrypted and stays strict (drop on auth failure = tamper).
-                var udpMode = 0  // 0 = undecided, 1 = encrypted, 2 = plaintext
+                // Each reassembled blob says what it is: a plaintext NAL begins with
+                // an Annex-B start code, a sealed one with its nonce (first byte 0x01).
+                // So a saved key against an UNENCRYPTED sender still shows the video,
+                // and an encrypted sender is recognised even with no key (before, its
+                // sealed blobs were fed to the decoder as if they were video).
+                var udpMode = 0  // 0 = undecided, 1 = encrypted (a blob opened), 2 = plaintext
+                var failures = 0
+                var lastAsk = 0L
                 val reasm = UdpReassembler { blob ->
                     if (!running.get()) return@UdpReassembler
+                    if (startsWithStartCode(blob)) {
+                        if (udpMode != 2) { udpMode = 2; onEncrypted(false) }
+                        nalQueue.offer(blob)
+                        return@UdpReassembler
+                    }
                     val s = videoSealer
-                    if (s == null) { nalQueue.offer(blob); return@UdpReassembler }
-                    when (udpMode) {
-                        1 -> s.open(blob, 0, blob.size)?.let { nalQueue.offer(it) }
-                        2 -> nalQueue.offer(blob)
-                        else -> {
-                            val pt = s.open(blob, 0, blob.size)
-                            udpMode = if (pt != null) 1 else 2
-                            onEncrypted(udpMode == 1)
-                            nalQueue.offer(pt ?: blob)
-                        }
+                    val pt = s?.open(blob, 0, blob.size)
+                    if (pt != null) {
+                        if (udpMode != 1) { udpMode = 1; failures = 0; onEncrypted(true) }
+                        nalQueue.offer(pt)
+                        return@UdpReassembler
+                    }
+                    // Sealed, and not openable: no key, or a different pairing code
+                    // (once the session has opened blobs, a stray failure is just a
+                    // damaged or forged packet and is dropped).
+                    if (s != null && (udpMode == 1 || ++failures < 3)) return@UdpReassembler
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (lastAsk == 0L || now - lastAsk >= 5000) {
+                        lastAsk = now
+                        onPairingNeeded(if (s == null) PAIR_NEEDS_CODE else PAIR_WRONG_SAVED, blob)
                     }
                 }
                 val buf = ByteArray(2048)
@@ -822,7 +1075,7 @@ private class H264TcpReceiver(
                     return
                 }
                 if (current == null) {
-                    drainOutput(decoder, info)
+                    drainOutput(decoder, info, generation)
                     continue
                 }
                 nal = null
@@ -835,10 +1088,10 @@ private class H264TcpReceiver(
                         decoder.queueInputBuffer(inputIndex, 0, current.size, 0L, 0)
                         queued = true
                     } else {
-                        drainOutput(decoder, info)
+                        drainOutput(decoder, info, generation)
                     }
                 }
-                drainOutput(decoder, info)
+                drainOutput(decoder, info, generation)
             }
         } finally {
             try { decoder.stop() } catch (_: Exception) {}
@@ -847,13 +1100,13 @@ private class H264TcpReceiver(
         }
     }
 
-    private fun drainOutput(decoder: MediaCodec, info: MediaCodec.BufferInfo) {
+    private fun drainOutput(decoder: MediaCodec, info: MediaCodec.BufferInfo, generation: Int) {
         while (true) {
             val outputIndex = decoder.dequeueOutputBuffer(info, 0)
             when {
                 outputIndex >= 0 -> {
                     decoder.releaseOutputBuffer(outputIndex, true)
-                    setShowing(true)
+                    frameShown(generation)
                 }
                 outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                     val format = decoder.outputFormat

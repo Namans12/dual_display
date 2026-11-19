@@ -130,7 +130,10 @@ namespace ExtendedDisplay
 
             Controls.AddRange(new Control[] { grpConn, grpVid, grpOpt, lblCode, lnkNewCode, lblStatus, btnStart, btnStop });
 
-            FormClosing += (s, e) => { StopSender(); DisableVdd(); };
+            // Every option is remembered between launches (like the Mac app); the
+            // pairing code keeps its own file next to it.
+            LoadSettings();
+            FormClosing += (s, e) => { SaveSettings(); StopSender(); DisableVdd(); };
 
             if (!File.Exists(exePath))
                 SetStatus("WARNING: sender not found at " + exePath, Color.Firebrick);
@@ -317,6 +320,72 @@ namespace ExtendedDisplay
             try { File.WriteAllText(CodePath(), code); } catch { }
         }
 
+        // ── Remembered settings ──────────────────────────────────────────
+        // Plain key=value lines in %LOCALAPPDATA%\ExtendedDisplay\settings.ini.
+        // Unknown or missing keys keep the defaults, so an old or hand-edited file
+        // never stops the launcher from opening.
+        static string SettingsPath()
+        {
+            return Path.Combine(Path.GetDirectoryName(CodePath()), "settings.ini");
+        }
+
+        void LoadSettings()
+        {
+            var v = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (File.Exists(SettingsPath()))
+                    foreach (string raw in File.ReadAllLines(SettingsPath()))
+                    {
+                        int eq = raw.IndexOf('=');
+                        if (eq > 0) v[raw.Substring(0, eq).Trim()] = raw.Substring(eq + 1).Trim();
+                    }
+            }
+            catch { return; }
+            string s;
+            Func<string, bool, bool> flag = (k, d) => v.TryGetValue(k, out s) ? s == "1" : d;
+            if (v.TryGetValue("connection", out s)) { rbWifi.Checked = s == "wifi"; rbUsb.Checked = s != "wifi"; }
+            if (v.TryGetValue("ip", out s)) txtIp.Text = s;
+            chkUdp.Checked = flag("udp", chkUdp.Checked);
+            if (v.TryGetValue("quality", out s))
+            {
+                rbBestRes.Checked = s == "best";
+                rbSmooth.Checked = s == "smooth";
+                rbBalanced.Checked = s != "best" && s != "smooth";
+            }
+            chkTouch.Checked = flag("touch", chkTouch.Checked);
+            chkHevc.Checked = flag("hevc", chkHevc.Checked);
+            chkHdr.Checked = flag("hdr", chkHdr.Checked);
+            chkAudio.Checked = flag("audio", chkAudio.Checked);
+            chkMute.Checked = chkAudio.Checked && flag("mute", chkMute.Checked);
+            int delay;
+            if (v.TryGetValue("audio_delay_ms", out s) && int.TryParse(s, out delay))
+                numDelay.Value = Math.Max(numDelay.Minimum, Math.Min(numDelay.Maximum, delay));
+            chkEncrypt.Checked = flag("encrypt", chkEncrypt.Checked);  // shows the saved code
+        }
+
+        void SaveSettings()
+        {
+            try
+            {
+                File.WriteAllLines(SettingsPath(), new[]
+                {
+                    "connection=" + (rbWifi.Checked ? "wifi" : "usb"),
+                    "ip=" + txtIp.Text.Trim(),
+                    "udp=" + (chkUdp.Checked ? "1" : "0"),
+                    "quality=" + (rbBestRes.Checked ? "best" : rbSmooth.Checked ? "smooth" : "balanced"),
+                    "touch=" + (chkTouch.Checked ? "1" : "0"),
+                    "hevc=" + (chkHevc.Checked ? "1" : "0"),
+                    "hdr=" + (chkHdr.Checked ? "1" : "0"),
+                    "audio=" + (chkAudio.Checked ? "1" : "0"),
+                    "mute=" + (chkMute.Checked ? "1" : "0"),
+                    "audio_delay_ms=" + (int)numDelay.Value,
+                    "encrypt=" + (chkEncrypt.Checked ? "1" : "0"),
+                });
+            }
+            catch { }
+        }
+
         // 8-char code from an unambiguous alphabet (no I/O/0/1), crypto-random.
         static string GenerateCode()
         {
@@ -331,6 +400,7 @@ namespace ExtendedDisplay
         void OnStart(object src, EventArgs e)
         {
             if (!File.Exists(exePath)) { SetStatus("Sender exe not found.", Color.Firebrick); return; }
+            SaveSettings();
             if (chkEncrypt.Checked && pairCode.Length == 0)
             {
                 pairCode = GenerateCode(); SaveCode(pairCode);
@@ -430,7 +500,15 @@ namespace ExtendedDisplay
             if (m.Success && m.Groups[1].Value != "0" && m.Groups[1].Value != "0.0")
                 liveFps = m.Groups[1].Value;
 
-            if (Regex.IsMatch(line, "Reconnecting|Stream ended", RegexOptions.IgnoreCase))
+            // The tablet holds a different pairing code (or none): the sender keeps
+            // retrying, and the tablet is asking for the code shown in this window.
+            if (Regex.IsMatch(line, "Pairing code mismatch", RegexOptions.IgnoreCase))
+                { liveState = "Pairing"; liveFps = ""; }
+            else if (Regex.IsMatch(line, "accepted the pairing code", RegexOptions.IgnoreCase))
+                liveState = "Streaming";
+            else if (liveState == "Pairing")
+                { liveFps = ""; }  // retries print "Streaming ... with"; stay on the pairing hint
+            else if (Regex.IsMatch(line, "Reconnecting|Stream ended", RegexOptions.IgnoreCase))
                 { liveState = "Reconnecting"; liveFps = ""; }
             else if (Regex.IsMatch(line, "Searching|No tablet found", RegexOptions.IgnoreCase))
                 liveState = "Searching";
@@ -444,6 +522,8 @@ namespace ExtendedDisplay
                 case "Streaming":
                     text = "Streaming  •  " + liveMode + (liveFps.Length > 0 ? "  •  " + liveFps + " fps" : "");
                     color = Color.Green; break;
+                case "Pairing":
+                    text = "Tablet needs the pairing code above - type it on the tablet."; color = Color.DarkOrange; break;
                 case "Reconnecting":
                     text = "Reconnecting…  (" + liveMode + ")"; color = Color.DarkOrange; break;
                 case "Searching":

@@ -17,7 +17,7 @@ real multi-touch injection and HDR (see the matrix and Limitations).
 
 ## Mac vs Windows — what works where
 
-| Capability | Windows host (v0.8.0) | Mac host |
+| Capability | Windows host (v0.11.0) | Mac host |
 |---|---|---|
 | Video to the tablet | ✅ H.264/HEVC, TCP + UDP | ✅ H.264 + HEVC, TCP + UDP |
 | Auto virtual display (true extend) | ✅ bundled IddCx driver | ✅ native CGVirtualDisplay, 2960x1848 HiDPI, 60 fps (default) |
@@ -29,11 +29,11 @@ real multi-touch injection and HDR (see the matrix and Limitations).
 | HDR | ✅ HDR10 via VDD | ❌ (virtual display is SDR — see Limitations) |
 | Settings GUI | ✅ | ✅ native window (SwiftUI) in ExtendedDisplay.app |
 
-The current receiver app (versionCode 9) stays fully compatible with the Mac
-host: a plaintext TCP stream has no `EXVE` marker, so the app feeds it straight
-to its Annex-B splitter and decodes. Tablet touches now drive the Mac cursor
-(the host connects to the tablet's touch port), and the pairing box can be
-ignored — it tucks away on its own once video starts.
+The receiver app (versionCode 10, built and verified on the tablet 2026-11-20 with the Windows
+host) works with the Mac host unchanged: a plaintext TCP stream has no `EXVE` marker, so the app
+feeds it straight to its Annex-B splitter and decodes. Tablet touches drive the Mac cursor (the host
+connects to the tablet's touch port). The tablet asks for the pairing code only when an encrypted
+stream arrives that it cannot open; a plaintext session never shows a prompt.
 
 ## Requirements
 
@@ -118,7 +118,8 @@ MacHost runs as a background process, so it has no Dock icon of its own (it used
 Wi-Fi the tablet app stays open to be found again, and from receiver v10 it blanks its own screen when the stream ends.
 
 On USB, Start restarts the tablet app: receivers up to v9 keep the decoder of their first stream, so switching
-H.264 ↔ HEVC otherwise gave no picture (fixed in the receiver source for v10).
+H.264 ↔ HEVC otherwise gave no picture. Receiver v10 re-detects the codec per connection (verified with the
+Windows host), so this restart is no longer needed with v10; it is still in the Mac app.
 
 > Status (2026-11-15, macOS 27, MacBook Air M4 + Galaxy Tab S9 Ultra, receiver v9). Verified on device through the
 > packaged app: install from the DMG, the permission checklist, Start/Stop over USB and Wi-Fi, all three quality
@@ -238,8 +239,8 @@ with a window drawing at 60 fps on the virtual display):
   2960x1848. `--fps 120` (1920x1200) did not deliver more than 60 real frames/s
   on that Mac, so it currently trades resolution for nothing there.
 - **ScreenCaptureKit sends a frame only when the screen changes**, and the
-  receiver (≤ v9) presents a decoded frame only when the next one arrives. So
-  MacHost re-submits the last frame for ~250 ms after the screen goes still;
+  receiver (≤ v9) presents a decoded frame only when the next one arrives (v10
+  presents it at once). So MacHost re-submits the last frame for ~250 ms after the screen goes still;
   without that the newest frame (the cursor leaving the tablet, the result of
   a tap) stayed undisplayed until something else changed.
 
@@ -365,6 +366,7 @@ Verify the KDF matches the other platforms byte-for-byte:
   so in practice this only matters if you wanted to drop it mid-session.
 - Audio/video are separate streams with no shared clock (lip-sync approximate,
   tune `--audio-delay-ms`) — same as the Windows host.
-- The receiver fix that presents each frame as soon as it is decoded is in
-  the source but not yet in a built APK (v9 is what ships); the Mac host's
-  frame re-submission covers it meanwhile.
+- Receiver v10 presents each frame as soon as it is decoded (verified on the
+  tablet: of six frames sent and then nothing, the sixth is on screen). The
+  Mac host's frame re-submission is now redundant but harmless; not yet
+  re-measured from the Mac with v10.

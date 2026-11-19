@@ -609,8 +609,11 @@ bool adbWaitForDevice(const std::string& adb) {
 
 // Minimum receiver versionCode this sender needs. v8 moved touch capture to the
 // Activity's dispatchTouchEvent (the SurfaceView OnTouchListener never fired);
-// v9 made the touch server re-accept a reconnecting host immediately.
-constexpr int kRequiredAppVersion = 9;
+// v9 made the touch server re-accept a reconnecting host immediately; v10
+// presents each frame at once, re-detects the codec per connection (H.264 <->
+// HEVC without restarting the app), blanks the screen when the stream ends and
+// asks for the pairing code only when an encrypted stream needs it.
+constexpr int kRequiredAppVersion = 10;
 
 void adbEnsureAppInstalled(const std::string& adb, const std::string& exeDir) {
     bool needInstall = true;
@@ -1930,7 +1933,15 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
 // and send it length-prefixed over a reliable TCP connection to the tablet. Used
 // when paired (g_pairKey) and NOT --udp, so encrypted Wi-Fi keeps TCP's
 // no-dropped-frames smoothness. Wire frame: [4-byte BE length][12B nonce][ct][16B tag].
-ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host, int tcpPort) {
+//
+// peerClosed is set when the TABLET ended the connection. A tablet holding a
+// different pairing key (or none it can use) closes the stream on the first frame,
+// so repeated quick closes mean a pairing mismatch, not an encoder failure.
+// announceStable: print a line once the stream has survived kProvenUptimeMs (the
+// GUI uses it to leave its "enter the code" state).
+ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host, int tcpPort,
+                                 bool& peerClosed, bool announceStable) {
+    peerClosed = false;
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -2017,6 +2028,10 @@ ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host
     size_t base = std::string::npos;
     while (!g_stop.load() && alive &&
            ReadFile(readPipe, chunk, sizeof(chunk), &got, nullptr) && got > 0) {
+        if (announceStable && GetTickCount64() - started >= kProvenUptimeMs) {
+            announceStable = false;
+            std::cout << "Tablet accepted the pairing code - streaming." << std::endl;
+        }
         buf.insert(buf.end(), chunk, chunk + got);
         if (base == std::string::npos) base = nextStart(buf, 0);
         if (base == std::string::npos) continue;
@@ -2033,6 +2048,7 @@ ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host
     // TCP connection (alive == false, e.g. the app restarted), ffmpeg is still
     // running and blocked on the now-undrained pipe — waiting INFINITE here would
     // deadlock the whole session. Kill it so the supervisor can reconnect.
+    peerClosed = encOk && !alive;
     WaitForSingleObject(pi.hProcess, (g_stop.load() || !alive) ? 0 : INFINITE);
     TerminateProcess(pi.hProcess, 1);  // no-op if it already exited
     ULONGLONG uptime = GetTickCount64() - started;
@@ -2121,6 +2137,8 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
     size_t idx = 0;
     bool proven = false;
     int fastFails = 0;
+    int shortDrops = 0;             // encrypted TCP: quick closes by the tablet in a row
+    bool mismatchReported = false;  // the pairing-mismatch line has been printed
 
     while (!g_stop.load()) {
         if (idx >= ladder.size()) {
@@ -2149,7 +2167,28 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
         if (options.udp) {
             uptime = runUdpAttempt(cmd, host, options.port);
         } else if (encTcp) {
-            uptime = runEncryptedTcpAttempt(cmd, host, options.port);
+            bool peerClosed = false;
+            uptime = runEncryptedTcpAttempt(cmd, host, options.port, peerClosed, mismatchReported);
+            if (g_stop.load()) break;
+            if (peerClosed && uptime < kProvenUptimeMs) {
+                // The tablet took the connection and closed it at once. Twice in a
+                // row is a pairing mismatch: say so and keep retrying with the SAME
+                // encoder (before, this walked the encoder ladder and gave up with
+                // "All encoder configurations failed").
+                if (++shortDrops >= 2 && !mismatchReported) {
+                    mismatchReported = true;
+                    std::cout << "Pairing code mismatch - the tablet keeps closing the encrypted "
+                                 "stream. Enter this PC's pairing code on the tablet (it is "
+                                 "asking for it now); retrying until it is entered." << std::endl;
+                }
+                if (mismatchReported) {
+                    sleepInterruptible(3000);
+                    continue;
+                }
+            } else if (uptime >= kProvenUptimeMs) {
+                shortDrops = 0;
+                mismatchReported = false;
+            }
         } else {
             PROCESS_INFORMATION pi{};
             if (!spawnProcess(cmd, pi)) {

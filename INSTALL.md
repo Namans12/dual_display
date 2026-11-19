@@ -14,7 +14,7 @@ This guide has three parts:
 
 ## What's in the package
 
-The distributable (`ExtendedDisplay-0.7.2-win64.zip`) contains everything — no
+The installer (`ExtendedDisplaySetup-<version>.exe`, on GitHub Releases) contains everything — no
 runtimes to install:
 
 | File | Purpose |
@@ -200,7 +200,7 @@ Then either:
 
 - **Portable ZIP** (no extra tools): stage `payload\*` plus `install-vdd.ps1`,
   `uninstall-vdd.ps1`, `Install-Driver.bat`, `QUICKSTART.txt` into a folder and zip
-  it. (This is what `dist\ExtendedDisplay-0.7.2-win64.zip` is.)
+  it, e.g. as `ExtendedDisplay-<version>-win64.zip`. (Releases ship only the installer.)
 - **`.exe` installer** (needs [Inno Setup 6](https://jrsoftware.org/isdl.php)):
   ```powershell
   & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
@@ -218,7 +218,7 @@ Then either:
 | "No extended display found" | VDD not installed or disabled → run `Install-Driver.bat`, reboot. Check `Get-PnpDevice -FriendlyName '*Virtual Display Driver*'`. |
 | Black bars on the tablet | Resolution mismatch. After the first driver install, **reboot** so 2960×1848 loads. |
 | Washed‑out / over‑bright video | The SDR path auto‑disables Windows HDR on the virtual display; if you launched with `--hdr` on an SDR desktop, drop `--hdr`. |
-| Touch does nothing | Use app **v8+** (bundled here). Tap directly on a window/icon shown on the tablet (touch ≠ mouse cursor). |
+| Touch does nothing | Use app **v10** (bundled here; the sender installs or upgrades it over USB). Tap directly on a window/icon shown on the tablet (touch ≠ mouse cursor). |
 | Wi‑Fi: tablet not found | PC + tablet on the **same** subnet; app open on the tablet; Wi‑Fi (not just USB) enabled on the tablet. |
 | Laggy over Wi‑Fi | Tick **Low‑latency UDP**; move to **5 GHz**; lower the bitrate (e.g. 15000). |
 | Encoder errors | Update GPU drivers; try `--encoder x264` (CPU) to isolate. |
