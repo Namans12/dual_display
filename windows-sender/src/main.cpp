@@ -578,6 +578,18 @@ bool setAdvancedColor(const std::string& gdiName, bool enable) {
         }
         if (gdiName != name) continue;
 
+        // Already in the requested state: don't send it again. Every HDR switch
+        // makes Windows rebuild the desktop, which can blank all screens briefly.
+        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO cur{};
+        cur.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+        cur.header.size = sizeof(cur);
+        cur.header.adapterId = paths[i].targetInfo.adapterId;
+        cur.header.id = paths[i].targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&cur.header) == ERROR_SUCCESS &&
+            (cur.advancedColorEnabled != 0) == enable) {
+            return true;
+        }
+
         DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE set{};
         set.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
         set.header.size = sizeof(set);
@@ -1497,21 +1509,35 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { cleanup(); CoUninitialize(); return; }
 
     // Optionally silence the PC's own speakers so sound only comes from the tablet.
-    // Loopback still captures the full mix while muted (verified), so the tablet
-    // keeps its audio. A marker file lets the next launch un-mute if we're killed.
-    // Keep the endpoint-volume handle open: pressing Volume Up/Down un-mutes the
-    // endpoint (Windows behaviour), so we re-assert the mute periodically below.
+    // On some PCs muting the speakers ALSO silences the loopback capture (measured
+    // on an ASUS laptop with Realtek audio, Windows 11 build 26320: peak 0.35
+    // unmuted, exactly 0 muted, and the same at volume 0), which would stream pure
+    // silence to the tablet. So the mute is applied only once sound is playing and
+    // then checked: if the capture goes silent right after muting, the speakers are
+    // un-muted again and the option is dropped for this session.
+    // A marker file lets the next launch un-mute if we're killed. Pressing Volume
+    // Up/Down un-mutes the endpoint (Windows behaviour), so a working mute is
+    // re-asserted periodically below.
     IAudioEndpointVolume* epv = nullptr;
-    bool didMute = false;
+    bool didMute = false;     // speakers currently muted by us
+    bool muteGivenUp = false; // muting silences the capture on this PC
+    bool muteConfirmed = false;
+    ULONGLONG mutedAt = 0;
+    bool soundAfterMute = false;
     if (muteLocal &&
-        SUCCEEDED(dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
-                                reinterpret_cast<void**>(&epv))) &&
-        SUCCEEDED(epv->SetMute(TRUE, nullptr))) {
-        didMute = true;
-        FILE* mf = nullptr;
-        if (fopen_s(&mf, muteMarkerPath().c_str(), "w") == 0 && mf) fclose(mf);
-        std::cout << "Desktop audio: PC speakers muted (sound plays on the tablet only).\n";
+        FAILED(dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                             reinterpret_cast<void**>(&epv)))) {
+        epv = nullptr;
     }
+    if (muteLocal && epv) {
+        std::cout << "Desktop audio: PC speakers will be muted once sound plays.\n";
+    }
+    auto unmuteLocal = [&]() {
+        if (!didMute) return;
+        epv->SetMute(FALSE, nullptr);
+        DeleteFileA(muteMarkerPath().c_str());
+        didMute = false;
+    };
     ULONGLONG lastRemute = GetTickCount64();
 
     const std::string connectHost = adbMode ? "127.0.0.1" : host;
@@ -1585,8 +1611,21 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
         client->Start();
         bool alive = true;
         while (!g_stop.load() && alive) {
+            // Mute check: 200-800 ms after muting, the capture must still carry
+            // sound (the first 200 ms can be audio buffered before the mute).
+            if (didMute && !muteConfirmed && GetTickCount64() - mutedAt > 800) {
+                if (soundAfterMute) {
+                    muteConfirmed = true;
+                    std::cout << "Desktop audio: PC speakers muted (sound plays on the tablet only)." << std::endl;
+                } else {
+                    unmuteLocal();
+                    muteGivenUp = true;
+                    std::cout << "Desktop audio: muting this PC's speakers also silences the sound "
+                                 "sent to the tablet (audio driver), so the PC speakers stay on." << std::endl;
+                }
+            }
             // Re-assert the mute if the user's volume keys un-muted the endpoint.
-            if (didMute) {
+            if (didMute && muteConfirmed) {
                 const ULONGLONG now = GetTickCount64();
                 if (now - lastRemute > 500) {
                     lastRemute = now;
@@ -1607,6 +1646,22 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
                 mixToStereoS16(data, frames, mixFmt,
                                (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0, pcm);
                 capture->ReleaseBuffer(frames);
+
+                if (epv && !muteGivenUp) {
+                    int peak = 0;
+                    for (int16_t v : pcm) { const int a = v < 0 ? -v : v; if (a > peak) peak = a; }
+                    const ULONGLONG now = GetTickCount64();
+                    if (!didMute && !muteConfirmed && peak > 300 &&  // ~1% full scale: real sound
+                        SUCCEEDED(epv->SetMute(TRUE, nullptr))) {
+                        didMute = true;
+                        mutedAt = now;
+                        soundAfterMute = false;
+                        FILE* mf = nullptr;
+                        if (fopen_s(&mf, muteMarkerPath().c_str(), "w") == 0 && mf) fclose(mf);
+                    } else if (didMute && !muteConfirmed && now - mutedAt > 200 && peak > 0) {
+                        soundAfterMute = true;
+                    }
+                }
 
                 const unsigned char* payload = reinterpret_cast<const unsigned char*>(pcm.data());
                 int payloadLen = static_cast<int>(pcm.size() * sizeof(int16_t));
@@ -1638,8 +1693,7 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
         if (!g_stop.load()) sleepInterruptible(1000);
     }
     if (didMute) {
-        epv->SetMute(FALSE, nullptr);
-        DeleteFileA(muteMarkerPath().c_str());
+        unmuteLocal();
         std::cout << "Desktop audio: PC speakers un-muted.\n";
     }
     if (epv) epv->Release();

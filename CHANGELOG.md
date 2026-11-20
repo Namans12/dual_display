@@ -47,6 +47,17 @@ first time and verified on a Galaxy Tab S9 Ultra with the Windows host.
   TCP stream it has no key for (after asking for the code), so the host shows
   the pairing hint instead of "Streaming".
 - A long-press on the visible status label no longer also reaches the computer.
+- **Windows GUI:** options are locked while streaming (they only apply at Start);
+  the window stays where you put it (Windows doubled its position when the
+  virtual display came or went, so it jumped to the bottom-right); Start no
+  longer re-applies the whole display layout, and the sender no longer re-sends
+  an HDR setting that is already in place (fewer screen re-configurations).
+- **Fixed: "Mute PC speakers" streamed silence.** On this laptop (Realtek, Windows
+  build 26320) muting the speakers, or setting their volume to 0, also silences
+  Windows' audio capture (measured: peak 0.35 unmuted, 0.00 muted). The sender
+  now mutes only once sound plays, checks the stream still carries sound, and
+  otherwise un-mutes and says so (GUI: "PC speakers can't be muted on this PC").
+  It also no longer fights the volume keys in that case.
 - Byte format, key derivation and encryption unchanged.
 - Verified with the Windows host: USB and Wi-Fi (TCP and UDP), plaintext and
   encrypted, finger touch over the encrypted link, desktop audio stream set up

@@ -91,6 +91,7 @@ See [docs/build.md](docs/build.md) for building each component and the full CLI,
 - **Washed out / over-bright** — the SDR path auto-disables Windows HDR on the virtual display for correct colours; only pass `--hdr` for real HDR content.
 - **Touch does nothing** — use the bundled app (v10; the sender installs it over USB); tap directly on windows/icons on the tablet (touch ≠ mouse cursor).
 - **ddagrab errors** — needs Windows 10 1903+ and a full GPL FFmpeg (the installer bundles one). `AcquireNextFrame failed: 887a0026` on every non-primary display (black, then a dropped stream) was seen once on an Insider build after about two weeks of uptime and cleared with a reboot.
+- **Desktop audio** plays on the tablet and the PC. "Mute PC speakers" works only where muting doesn't also silence Windows' audio capture; on PCs where it does (the sender checks), the speakers stay on and the GUI says so.
 - **Tablet asks for a code** — the PC has **Encrypt** on and the tablet does not have this PC's code. Type the 8 characters shown in the GUI; the picture appears by itself. Long-press the status text on the tablet to forget a saved code.
 
 ## Roadmap (not yet built)
