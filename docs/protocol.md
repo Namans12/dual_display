@@ -32,9 +32,11 @@ the host picks the transport (USB/TCP for reliability, Wi-Fi/UDP for latency).
 When paired, the sender proxies ffmpeg and sends a 4-byte plaintext marker `EXVE`
 (`0x45585645`) first, then length-prefixed AES-GCM frames `[4B BE len][12B nonce]
 [ciphertext][16B tag]` (nonce prefix `0x01`). The tablet detects the marker and
-reads the pairing key **per frame**: before the code is entered it drains frames
-(no garbage decode), and once keyed the next frames decrypt on the same connection
-(no reconnect). A plaintext stream instead begins with an Annex-B start code, which
+reads the pairing key **per frame**. If it has no key (receiver v10, 0.11.0) it asks
+for the code and closes the connection, so the host can report it; the host retries
+and, once the code is entered, the next connection decrypts. (Before v10 it drained
+frames on the open connection, which the host could not see.) A frame the saved key
+cannot open closes the connection too. Byte format unchanged. A plaintext stream instead begins with an Annex-B start code, which
 the tablet feeds to the splitter.
 
 ### UDP video framing

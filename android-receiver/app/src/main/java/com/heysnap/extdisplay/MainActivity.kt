@@ -517,6 +517,19 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         // While the pairing prompt is up, touches are for the prompt, not the host.
         if (pairPromptVisible()) return super.dispatchTouchEvent(event)
+        // A gesture that starts on the visible status label is for the label
+        // (long-press = forget the pairing code), not for the computer.
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            labelGesture = statusView.visibility == View.VISIBLE &&
+                event.x >= statusView.left && event.x < statusView.right &&
+                event.y >= statusView.top && event.y < statusView.bottom
+        }
+        if (labelGesture) {
+            val handled = super.dispatchTouchEvent(event)
+            if (event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL) labelGesture = false
+            return handled
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
                 sendPointer(event, event.actionIndex, 0)
@@ -543,6 +556,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private val locBuf = IntArray(2)
     private var loggedFirstTouch = false
+    private var labelGesture = false
 
     /**
      * Emits one v2 packet for pointer [i] of [event]. Coordinates are window-
@@ -860,7 +874,6 @@ private class H264TcpReceiver(
                         val inp = java.io.DataInputStream(pin)
                         val lenBuf = ByteArray(4)
                         var opened = false     // a frame of this connection decrypted
-                        var lastAsk = 0L       // when the pairing prompt was last asked for
                         while (running.get()) {
                             inp.readFully(lenBuf)
                             val n = ((lenBuf[0].toInt() and 0xff) shl 24) or
@@ -872,16 +885,14 @@ private class H264TcpReceiver(
                             inp.readFully(frame)
                             val s = videoSealer
                             if (s == null) {
-                                // Not keyed (yet, or the pairing was just forgotten):
-                                // drain, blank any picture, and ask for the code. Asked
-                                // again every few seconds in case the prompt was dismissed.
-                                val now = android.os.SystemClock.uptimeMillis()
-                                if (lastAsk == 0L || now - lastAsk >= 5000) {
-                                    lastAsk = now
-                                    endTcpStream()
-                                    onPairingNeeded(PAIR_NEEDS_CODE, frame)
-                                }
-                                continue
+                                // Not keyed (yet, or the pairing was just forgotten): ask
+                                // for the code and close the connection. Closing (instead
+                                // of draining on an open connection) is what lets both
+                                // hosts see it and say "enter the code on the tablet";
+                                // they retry every few seconds, so the picture still
+                                // appears by itself once the code is in.
+                                onPairingNeeded(PAIR_NEEDS_CODE, frame)
+                                break
                             }
                             val nal = s.open(frame, 0, frame.size)
                             if (nal == null) {

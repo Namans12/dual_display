@@ -35,11 +35,24 @@ first time and verified on a Galaxy Tab S9 Ultra with the Windows host.
   `%LOCALAPPDATA%\ExtendedDisplay\settings.ini`, like the Mac app.
 - **Version gates raised to 10** in the Windows sender and the Mac DMG script,
   so both hosts upgrade a tablet still on v9.
-- Wire protocol, key derivation and encryption unchanged.
+- **Windows sender picks only the virtual display.** It used to take the first
+  non-primary display, so with a real second monitor attached it streamed that
+  monitor and changed its resolution and HDR. It now attaches the virtual display
+  itself (even when Windows' saved layout leaves it out) and changes modes only
+  on it; `--list-displays` marks it `virtual`.
+- **ffmpeg exits with the sender** (job object), including when the launcher's
+  Stop or Task Manager kills the sender. Sender output is unbuffered, so the
+  launcher's status line no longer lags.
+- **No code on the tablet is reported too:** the tablet now closes an encrypted
+  TCP stream it has no key for (after asking for the code), so the host shows
+  the pairing hint instead of "Streaming".
+- A long-press on the visible status label no longer also reaches the computer.
+- Byte format, key derivation and encryption unchanged.
 - Verified with the Windows host: USB and Wi-Fi (TCP and UDP), plaintext and
   encrypted, finger touch over the encrypted link, desktop audio stream set up
   (plaintext and encrypted). Not verified: S Pen (adb cannot inject a hover),
-  that audio is audible, smoothness by eye, the Mac host with v10.
+  that audio is audible, smoothness by eye, the Mac host with v10, display
+  selection with a real second monitor plugged in (after the change).
 
 ## v0.10.0 — 2026-11-15 (Mac package, verified on device; receiver v10 pending a Windows build)
 

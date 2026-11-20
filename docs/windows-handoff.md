@@ -28,7 +28,7 @@ merged into **`main`** of `https://github.com/Namans12/dual_display.git`.
 | "Decoder reset" message | Left as is (shows 2.5 s, fades). It is only shown while video is on screen if the decoder recovers by itself, so holding the label up would cover a working picture. |
 | Tablet pairing box | Replaced by the prompt described in CHANGELOG v0.11.0. |
 
-Found on Windows and **not changed** (listed for a decision):
+Found on Windows; items 1–4 and 6 fixed in a follow-up commit (see the end of this list), 5 and 7 left:
 
 1. With a real second monitor attached, the sender picks the first non-primary display, so it streams that
    monitor instead of the virtual display (and tries to set it to 2960x1848 and to SDR). Workaround: `--display N`.
@@ -43,6 +43,21 @@ Found on Windows and **not changed** (listed for a decision):
    (`mac-host/` is out of scope); harmless with v10.
 6. Long-pressing the tablet's status label while streaming also sends that touch to the computer.
 7. Over UDP the tablet still does not show "Disconnected" when the host stops (it cannot see a UDP stream end).
+
+Follow-up fixes:
+
+- **1:** the sender picks only the virtual display (recognised by its driver name / `MTT1337` id) and attaches
+  it itself; resolution and SDR changes apply only to it. A real monitor is used only with `--display N`, and
+  its mode is left alone. Verified with only the virtual display present; the HDMI case was not re-tested
+  after the change (the monitor had been unplugged).
+- **2:** sender output is unbuffered.
+- **3:** ffmpeg runs in a kill-on-close job object, so it exits whenever the sender does (verified by killing
+  only the sender).
+- **4:** a tablet with no key now asks for the code and closes the encrypted TCP connection, so both hosts
+  report it; the picture still appears by itself after the code is entered (7 s in the test).
+- **6:** a gesture that starts on the visible status label stays on the tablet.
+- **Left:** 5 is in `mac-host/` (out of scope). 7 needs a host heartbeat (a protocol change): a receiver
+  timeout alone would blank a still Mac desktop, which only sends frames on change.
 
 ## Known inconsistencies (found from the Mac; none fixed there)
 
