@@ -8,7 +8,7 @@ Built and verified on a Samsung Galaxy Tab S9 Ultra (2960×1848) + Windows 11.
 
 **📖 Full step-by-step guide: [INSTALL.md](INSTALL.md)** (new-device setup, manual driver steps, packaging, troubleshooting).
 
-Quick version — from the portable ZIP (`ExtendedDisplay-0.7.2-win64.zip`) or the installer:
+Quick version — with the installer **`ExtendedDisplaySetup-<version>.exe`** from [Releases](https://github.com/Namans12/dual_display/releases) (or a portable folder you build yourself, see INSTALL.md):
 
 1. **Install the virtual display driver once:** right-click **`Install-Driver.bat`** → Run as administrator, then **reboot once**. (Or run `ExtendedDisplaySetup.exe` with the driver option ticked.)
 2. On the tablet: enable Developer Options → USB debugging (USB path), or sideload `ExtendedDisplayReceiver.apk` (Wi-Fi path).
@@ -89,15 +89,16 @@ See [docs/build.md](docs/build.md) for building each component and the full CLI,
 - **"falling back to..."** — normal; the encoder ladder is finding what your GPU supports.
 - **Soft/blurry text** — raise `--bitrate` (default 25000).
 - **Washed out / over-bright** — the SDR path auto-disables Windows HDR on the virtual display for correct colours; only pass `--hdr` for real HDR content.
-- **Touch does nothing** — use the bundled app (v8+); tap directly on windows/icons on the tablet (touch ≠ mouse cursor).
-- **ddagrab errors** — needs Windows 10 1903+ and a full GPL FFmpeg (the installer bundles one).
+- **Touch does nothing** — use the bundled app (v10; the sender installs it over USB); tap directly on windows/icons on the tablet (touch ≠ mouse cursor).
+- **ddagrab errors** — needs Windows 10 1903+ and a full GPL FFmpeg (the installer bundles one). `AcquireNextFrame failed: 887a0026` on every non-primary display (black, then a dropped stream) was seen once on an Insider build after about two weeks of uptime and cleared with a reboot.
+- **Desktop audio** plays on the tablet and the PC. "Mute PC speakers" works only where muting doesn't also silence Windows' audio capture; on PCs where it does (the sender checks), the speakers stay on and the GUI says so.
+- **Tablet asks for a code** — the PC has **Encrypt** on and the tablet does not have this PC's code. Type the 8 characters shown in the GUI; the picture appears by itself. Long-press the status text on the tablet to forget a saved code.
 
 ## Roadmap (not yet built)
 
 - QR-scan pairing (today you type the 8-char code; the encryption itself shipped in v0.8.0 — see [SECURITY.md](SECURITY.md)).
 - UDP loss resilience: FEC + on-demand keyframes + RTT-adaptive bitrate (needs a receiver→sender feedback channel; deliberately deferred — see [Fixes.md](Fixes.md)).
 - Mac: true pinch/multi-touch and HDR (macOS platform limits); notarized Developer ID signing (today the app is self-signed).
-- Receiver v10 (frame presentation, fading status label, codec switching, blank screen on stop, clearer pairing prompt): source is in the repo, APK build pending — see [docs/windows-handoff.md](docs/windows-handoff.md).
 
 ## Related Repositories
 

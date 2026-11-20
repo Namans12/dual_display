@@ -102,8 +102,13 @@ can't authenticate it, it reports "wrong pairing code" and disconnects.
    - Storage caveat: the key sits in app-private storage (sandboxed, not
      hardware-backed). Fine for this threat model (LAN attacker, not a
      compromised device); Android Keystore wrapping would be the upgrade.
-   Remaining polish (todo): richer "wrong code" UX in the GUI, optional
-   open-LAN toggle.
+   - **Pairing prompt (v0.11.0, receiver v10):** the tablet asks for the code only
+     when an encrypted stream arrives that it cannot open, checks a typed code
+     against a frame of that stream before saving it (a wrong code is reported
+     and never saved), and can forget the saved key (long-press the status
+     label). The Windows and Mac hosts report a pairing mismatch when the tablet
+     keeps closing the encrypted stream. Key derivation and framing unchanged.
+   Remaining polish (todo): optional open-LAN toggle.
 
 Opt-in: streams stay open (today's behaviour) unless a pairing code is set, so a
 trusted home LAN needn't change. Encryption engages automatically once paired.

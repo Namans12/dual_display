@@ -38,6 +38,8 @@ namespace ExtendedDisplay
         NumericUpDown numDelay;
         Button btnStart, btnStop;
         Label lblStatus, lblCode;
+        GroupBox grpConn, grpVid, grpOpt;  // locked while streaming
+        Point home;                        // where the user put the window
         LinkLabel lnkNewCode;
         ToolTip tip;
         string pairCode = "";
@@ -46,6 +48,7 @@ namespace ExtendedDisplay
         string liveFps = "";
         string liveState = "";
         string liveMode = "";
+        string liveNote = "";  // e.g. the PC speakers could not be muted
 
         public MainForm()
         {
@@ -62,7 +65,7 @@ namespace ExtendedDisplay
             tip = new ToolTip { AutoPopDelay = 30000, InitialDelay = 350, ReshowDelay = 100, ShowAlways = true };
 
             // ── Connection ────────────────────────────────────────────────
-            var grpConn = new GroupBox { Text = "Connection", Location = new Point(12, 10), Size = new Size(376, 96) };
+            grpConn = new GroupBox { Text = "Connection", Location = new Point(12, 10), Size = new Size(376, 96) };
             rbUsb = new RadioButton { Text = "USB  (auto-detect)", Location = new Point(12, 24), AutoSize = true, Checked = true };
             rbWifi = new RadioButton { Text = "Wi-Fi", Location = new Point(12, 50), AutoSize = true };
             var lblIp = new Label { Text = "IP (optional):", Location = new Point(92, 52), AutoSize = true };
@@ -77,7 +80,7 @@ namespace ExtendedDisplay
             // One preset instead of FPS / encoder / bitrate knobs — each maps to
             // proven values (the encoder always uses the auto-ladder). Fine-grained
             // control stays on the CLI (--fps / --bitrate / --encoder).
-            var grpVid = new GroupBox { Text = "Quality", Location = new Point(12, 114), Size = new Size(376, 100) };
+            grpVid = new GroupBox { Text = "Quality", Location = new Point(12, 114), Size = new Size(376, 100) };
             rbBestRes = new RadioButton { Text = "Best resolution", Location = new Point(12, 22), AutoSize = true };
             var iBestRes = Info(22, "Sharpest picture - native 2960x1848 at 60 fps with a higher 40 Mbps bitrate. Best for reading / documents / coding. Prefers USB or strong 5 GHz Wi-Fi.", rbBestRes);
             rbBalanced = new RadioButton { Text = "Balanced  (recommended)", Location = new Point(12, 48), AutoSize = true, Checked = true };
@@ -88,7 +91,7 @@ namespace ExtendedDisplay
 
             // ── Options ───────────────────────────────────────────────────
             // Short labels; the full description is on the ⓘ (and on hover of the row).
-            var grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(376, 214) };
+            grpOpt = new GroupBox { Text = "Options", Location = new Point(12, 222), Size = new Size(376, 214) };
             chkTouch = new CheckBox { Text = "Touch input", Location = new Point(12, 24), AutoSize = true, Checked = true };
             var iTouch = Info(24, "Tablet touches control the PC - tap = click, drag = move / scroll, long-press = right-click. S Pen pressure & hover work too.", chkTouch);
             chkHevc = new CheckBox { Text = "HEVC / H.265", Location = new Point(12, 50), AutoSize = true };
@@ -98,7 +101,7 @@ namespace ExtendedDisplay
             chkAudio = new CheckBox { Text = "Desktop audio", Location = new Point(12, 102), AutoSize = true };
             var iAudio = Info(102, "Play the PC's sound on the tablet over the same link (no extra driver needed).", chkAudio);
             chkMute = new CheckBox { Text = "› Mute PC speakers", Location = new Point(30, 128), AutoSize = true, Enabled = false };
-            var iMute = Info(128, "Sound plays only on the tablet; the PC's own speakers stay silent while streaming (restored when you Stop).", chkMute);
+            var iMute = Info(128, "Sound plays only on the tablet; the PC's own speakers stay silent while streaming (restored when you Stop). Applied once sound plays; on PCs where muting also silences what is sent to the tablet, the speakers stay on and the status line says so.", chkMute);
             var lblDelay = new Label { Text = "› A/V sync delay (ms):", Location = new Point(30, 157), AutoSize = true, Enabled = false };
             numDelay = new NumericUpDown { Location = new Point(180, 154), Width = 62, Minimum = 20, Maximum = 500, Value = 40, Increment = 5, Enabled = false };
             var iDelay = Info(157, "Audio delay for lip-sync (ms). Higher = audio plays later; lower it if audio lags the video. ~40 matches the tablet's own video; ~20 for watching the laptop with the tablet as a speaker.", numDelay);
@@ -130,7 +133,10 @@ namespace ExtendedDisplay
 
             Controls.AddRange(new Control[] { grpConn, grpVid, grpOpt, lblCode, lnkNewCode, lblStatus, btnStart, btnStop });
 
-            FormClosing += (s, e) => { StopSender(); DisableVdd(); };
+            // Every option is remembered between launches (like the Mac app); the
+            // pairing code keeps its own file next to it.
+            LoadSettings();
+            FormClosing += (s, e) => { SaveSettings(); StopSender(); DisableVdd(); };
 
             if (!File.Exists(exePath))
                 SetStatus("WARNING: sender not found at " + exePath, Color.Firebrick);
@@ -180,6 +186,45 @@ namespace ExtendedDisplay
             return l;
         }
 
+        // Options apply when the sender starts, so they are locked while it runs
+        // (changing them mid-stream did nothing until the next Start).
+        void SetOptionsLocked(bool locked)
+        {
+            grpConn.Enabled = grpVid.Enabled = grpOpt.Enabled = !locked;
+            lnkNewCode.Enabled = !locked;
+        }
+
+        // Keep the window where the user put it. The launcher is DPI-unaware, and
+        // when the virtual display is switched on or off Windows rescales such
+        // windows' positions (measured: 568,306 -> 1143,619 on a 250 % laptop
+        // panel, i.e. doubled), so it jumped to the bottom-right on Start/Stop.
+        protected override void OnResizeEnd(EventArgs e)
+        {
+            base.OnResizeEnd(e);
+            home = Location;  // the user dragged it
+        }
+
+        void RestoreHome()
+        {
+            if (WindowState != FormWindowState.Normal) return;
+            var r = new Rectangle(home, Size);
+            foreach (var s in Screen.AllScreens)
+                if (s.WorkingArea.IntersectsWith(r)) { Location = home; return; }
+            CenterToScreen();  // its screen is gone
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (m.Msg == 0x007E /* WM_DISPLAYCHANGE */ && IsHandleCreated && !home.IsEmpty)
+            {
+                // Windows moves the window just after this message; restore after it.
+                var t = new Timer { Interval = 300 };
+                t.Tick += (s, e) => { t.Stop(); t.Dispose(); RestoreHome(); };
+                t.Start();
+            }
+        }
+
         string ResolveSenderPath()
         {
             // Packaged: the sender sits beside this launcher. Dev tree: the launcher
@@ -226,7 +271,10 @@ namespace ExtendedDisplay
             RunHidden("powershell.exe",
                 "-NoProfile -ExecutionPolicy Bypass -Command \"Enable-PnpDevice -InstanceId '" + VddInstanceId + "' -Confirm:$false -EA SilentlyContinue\"");
             System.Threading.Thread.Sleep(2000);
-            Native.SetDisplayConfig(0, IntPtr.Zero, 0, IntPtr.Zero, Native.SDC_APPLY | Native.SDC_TOPOLOGY_EXTEND);
+            // No SDC_TOPOLOGY_EXTEND here any more: it re-applies the whole saved
+            // layout (every screen). Enabling the driver brings the display back,
+            // and the sender attaches it itself if Windows left it out.
+            RestoreHome();
         }
 
         // Disable ONLY the VDD device. Windows removes its extended area from the
@@ -240,6 +288,7 @@ namespace ExtendedDisplay
 
         void DisableVdd()
         {
+            try { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)RestoreHome); } catch { }
             // Device-only disable removes just the VDD; real external monitors are
             // untouched. (A SDC_TOPOLOGY_INTERNAL collapse would force the laptop
             // panel and drop any real second monitor.)
@@ -253,6 +302,7 @@ namespace ExtendedDisplay
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            home = Location;
             btnStart.Enabled = false;
             SetStatus("Checking for a leftover virtual display...", Color.DimGray);
             var worker = new System.ComponentModel.BackgroundWorker();
@@ -317,6 +367,72 @@ namespace ExtendedDisplay
             try { File.WriteAllText(CodePath(), code); } catch { }
         }
 
+        // ── Remembered settings ──────────────────────────────────────────
+        // Plain key=value lines in %LOCALAPPDATA%\ExtendedDisplay\settings.ini.
+        // Unknown or missing keys keep the defaults, so an old or hand-edited file
+        // never stops the launcher from opening.
+        static string SettingsPath()
+        {
+            return Path.Combine(Path.GetDirectoryName(CodePath()), "settings.ini");
+        }
+
+        void LoadSettings()
+        {
+            var v = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (File.Exists(SettingsPath()))
+                    foreach (string raw in File.ReadAllLines(SettingsPath()))
+                    {
+                        int eq = raw.IndexOf('=');
+                        if (eq > 0) v[raw.Substring(0, eq).Trim()] = raw.Substring(eq + 1).Trim();
+                    }
+            }
+            catch { return; }
+            string s;
+            Func<string, bool, bool> flag = (k, d) => v.TryGetValue(k, out s) ? s == "1" : d;
+            if (v.TryGetValue("connection", out s)) { rbWifi.Checked = s == "wifi"; rbUsb.Checked = s != "wifi"; }
+            if (v.TryGetValue("ip", out s)) txtIp.Text = s;
+            chkUdp.Checked = flag("udp", chkUdp.Checked);
+            if (v.TryGetValue("quality", out s))
+            {
+                rbBestRes.Checked = s == "best";
+                rbSmooth.Checked = s == "smooth";
+                rbBalanced.Checked = s != "best" && s != "smooth";
+            }
+            chkTouch.Checked = flag("touch", chkTouch.Checked);
+            chkHevc.Checked = flag("hevc", chkHevc.Checked);
+            chkHdr.Checked = flag("hdr", chkHdr.Checked);
+            chkAudio.Checked = flag("audio", chkAudio.Checked);
+            chkMute.Checked = chkAudio.Checked && flag("mute", chkMute.Checked);
+            int delay;
+            if (v.TryGetValue("audio_delay_ms", out s) && int.TryParse(s, out delay))
+                numDelay.Value = Math.Max(numDelay.Minimum, Math.Min(numDelay.Maximum, delay));
+            chkEncrypt.Checked = flag("encrypt", chkEncrypt.Checked);  // shows the saved code
+        }
+
+        void SaveSettings()
+        {
+            try
+            {
+                File.WriteAllLines(SettingsPath(), new[]
+                {
+                    "connection=" + (rbWifi.Checked ? "wifi" : "usb"),
+                    "ip=" + txtIp.Text.Trim(),
+                    "udp=" + (chkUdp.Checked ? "1" : "0"),
+                    "quality=" + (rbBestRes.Checked ? "best" : rbSmooth.Checked ? "smooth" : "balanced"),
+                    "touch=" + (chkTouch.Checked ? "1" : "0"),
+                    "hevc=" + (chkHevc.Checked ? "1" : "0"),
+                    "hdr=" + (chkHdr.Checked ? "1" : "0"),
+                    "audio=" + (chkAudio.Checked ? "1" : "0"),
+                    "mute=" + (chkMute.Checked ? "1" : "0"),
+                    "audio_delay_ms=" + (int)numDelay.Value,
+                    "encrypt=" + (chkEncrypt.Checked ? "1" : "0"),
+                });
+            }
+            catch { }
+        }
+
         // 8-char code from an unambiguous alphabet (no I/O/0/1), crypto-random.
         static string GenerateCode()
         {
@@ -331,6 +447,7 @@ namespace ExtendedDisplay
         void OnStart(object src, EventArgs e)
         {
             if (!File.Exists(exePath)) { SetStatus("Sender exe not found.", Color.Firebrick); return; }
+            SaveSettings();
             if (chkEncrypt.Checked && pairCode.Length == 0)
             {
                 pairCode = GenerateCode(); SaveCode(pairCode);
@@ -339,6 +456,7 @@ namespace ExtendedDisplay
 
             SetStatus("Enabling virtual display...", Color.DimGray);
             btnStart.Enabled = false;
+            SetOptionsLocked(true);
             EnableVdd();
 
             var sb = new System.Text.StringBuilder();
@@ -367,7 +485,7 @@ namespace ExtendedDisplay
 
             try
             {
-                liveFps = ""; liveState = "Starting";
+                liveFps = ""; liveState = "Starting"; liveNote = "";
                 liveMode = rbWifi.Checked ? (chkUdp.Checked ? "Wi-Fi UDP" : "Wi-Fi") : "USB";
                 var psi = new ProcessStartInfo
                 {
@@ -404,6 +522,7 @@ namespace ExtendedDisplay
                             {
                                 SetStatus("Sender exited.", Color.DimGray);
                                 btnStart.Enabled = true;
+                                SetOptionsLocked(false);
                                 btnStop.Enabled = false;
                                 DisableVdd();  // don't leave a ghost display with Stop greyed out
                             }
@@ -418,6 +537,7 @@ namespace ExtendedDisplay
             {
                 SetStatus("Failed: " + ex.Message, Color.Firebrick);
                 btnStart.Enabled = true;
+                SetOptionsLocked(false);
                 DisableVdd();
             }
         }
@@ -430,7 +550,17 @@ namespace ExtendedDisplay
             if (m.Success && m.Groups[1].Value != "0" && m.Groups[1].Value != "0.0")
                 liveFps = m.Groups[1].Value;
 
-            if (Regex.IsMatch(line, "Reconnecting|Stream ended", RegexOptions.IgnoreCase))
+            if (line.IndexOf("muting this PC's speakers also silences", StringComparison.OrdinalIgnoreCase) >= 0)
+                liveNote = "PC speakers can't be muted on this PC (it would silence the tablet)";
+            // The tablet holds a different pairing code (or none): the sender keeps
+            // retrying, and the tablet is asking for the code shown in this window.
+            if (Regex.IsMatch(line, "Pairing code mismatch", RegexOptions.IgnoreCase))
+                { liveState = "Pairing"; liveFps = ""; }
+            else if (Regex.IsMatch(line, "accepted the pairing code", RegexOptions.IgnoreCase))
+                liveState = "Streaming";
+            else if (liveState == "Pairing")
+                { liveFps = ""; }  // retries print "Streaming ... with"; stay on the pairing hint
+            else if (Regex.IsMatch(line, "Reconnecting|Stream ended", RegexOptions.IgnoreCase))
                 { liveState = "Reconnecting"; liveFps = ""; }
             else if (Regex.IsMatch(line, "Searching|No tablet found", RegexOptions.IgnoreCase))
                 liveState = "Searching";
@@ -442,8 +572,11 @@ namespace ExtendedDisplay
             switch (liveState)
             {
                 case "Streaming":
-                    text = "Streaming  •  " + liveMode + (liveFps.Length > 0 ? "  •  " + liveFps + " fps" : "");
+                    text = "Streaming  •  " + liveMode + (liveFps.Length > 0 ? "  •  " + liveFps + " fps" : "")
+                         + (liveNote.Length > 0 ? "  •  " + liveNote : "");
                     color = Color.Green; break;
+                case "Pairing":
+                    text = "Tablet needs the pairing code above - type it on the tablet."; color = Color.DarkOrange; break;
                 case "Reconnecting":
                     text = "Reconnecting…  (" + liveMode + ")"; color = Color.DarkOrange; break;
                 case "Searching":
@@ -474,6 +607,7 @@ namespace ExtendedDisplay
             DisableVdd();
             SetStatus("Stopped - virtual display hidden.", Color.DimGray);
             btnStart.Enabled = true;
+            SetOptionsLocked(false);
         }
 
         [STAThread]

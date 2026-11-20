@@ -1,5 +1,70 @@
 # Changelog
 
+## v0.11.0 — 2026-11-20 (receiver v10 built + Windows host, verified on device)
+
+Receiver **v10** (versionCode 10, versionName 0.11.0) built on Windows for the
+first time and verified on a Galaxy Tab S9 Ultra with the Windows host.
+
+- **Receiver: the four Mac-written fixes compile and work.** Each decoded frame
+  is presented at once (six frames sent, then silence: the sixth is on
+  screen); the status label fades 2.5 s after the picture appears; H.264 ↔ HEVC
+  switches without restarting the app; Stop leaves a black screen with
+  "Disconnected — waiting for the computer".
+- **Fixed (receiver): frozen frame after Stop.** Frames still inside the
+  decoder were presented after the disconnect and lifted the black cover
+  again, so the old desktop came back under the "Disconnected" label. Frames
+  from an ended connection no longer count as "picture showing".
+- **Receiver: new pairing prompt.** No box at start. A centred prompt appears
+  only when an encrypted stream arrives that the tablet cannot open (no key, or
+  the saved key belongs to another computer; TCP and UDP). Large 8-character
+  field limited to the code alphabet (lower case accepted). The code is checked
+  against the stream immediately: a wrong one says so and is never saved; a
+  right one shows "Paired" and the picture follows by itself. Long-press the
+  status label to forget the saved code (with confirmation); forgetting now
+  also removes the saved copy. Over UDP an encrypted stream is now recognised
+  even without a key (before, its sealed packets were fed to the decoder).
+- **Fixed (receiver): grey veil with a hardware keyboard.** Key input took the
+  window out of touch mode and Android drew its focus highlight over the whole
+  screen.
+- **Windows host: pairing mismatch is reported.** When the tablet keeps closing
+  the encrypted stream the sender prints `Pairing code mismatch …`, keeps
+  retrying with the same encoder (it used to treat the drops as encoder
+  failures), and the GUI shows "Tablet needs the pairing code above".
+- **Windows launcher remembers every option** (connection, IP, UDP, quality,
+  touch, HEVC, HDR, audio, mute, A/V delay, Encrypt) in
+  `%LOCALAPPDATA%\ExtendedDisplay\settings.ini`, like the Mac app.
+- **Version gates raised to 10** in the Windows sender and the Mac DMG script,
+  so both hosts upgrade a tablet still on v9.
+- **Windows sender picks only the virtual display.** It used to take the first
+  non-primary display, so with a real second monitor attached it streamed that
+  monitor and changed its resolution and HDR. It now attaches the virtual display
+  itself (even when Windows' saved layout leaves it out) and changes modes only
+  on it; `--list-displays` marks it `virtual`.
+- **ffmpeg exits with the sender** (job object), including when the launcher's
+  Stop or Task Manager kills the sender. Sender output is unbuffered, so the
+  launcher's status line no longer lags.
+- **No code on the tablet is reported too:** the tablet now closes an encrypted
+  TCP stream it has no key for (after asking for the code), so the host shows
+  the pairing hint instead of "Streaming".
+- A long-press on the visible status label no longer also reaches the computer.
+- **Windows GUI:** options are locked while streaming (they only apply at Start);
+  the window stays where you put it (Windows doubled its position when the
+  virtual display came or went, so it jumped to the bottom-right); Start no
+  longer re-applies the whole display layout, and the sender no longer re-sends
+  an HDR setting that is already in place (fewer screen re-configurations).
+- **Fixed: "Mute PC speakers" streamed silence.** On this laptop (Realtek, Windows
+  build 26320) muting the speakers, or setting their volume to 0, also silences
+  Windows' audio capture (measured: peak 0.35 unmuted, 0.00 muted). The sender
+  now mutes only once sound plays, checks the stream still carries sound, and
+  otherwise un-mutes and says so (GUI: "PC speakers can't be muted on this PC").
+  It also no longer fights the volume keys in that case.
+- Byte format, key derivation and encryption unchanged.
+- Verified with the Windows host: USB and Wi-Fi (TCP and UDP), plaintext and
+  encrypted, finger touch over the encrypted link, desktop audio stream set up
+  (plaintext and encrypted). Not verified: S Pen (adb cannot inject a hover),
+  that audio is audible, smoothness by eye, the Mac host with v10, display
+  selection with a real second monitor plugged in (after the change).
+
 ## v0.10.0 — 2026-11-15 (Mac package, verified on device; receiver v10 pending a Windows build)
 
 - **Installable Mac app.** Signed with one self-signed certificate so privacy

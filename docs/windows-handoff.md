@@ -13,6 +13,52 @@ merged into **`main`** of `https://github.com/Namans12/dual_display.git`.
 3. **Confirm the Windows host still works** with the new receiver, and bring the Windows side in line with the Mac.
 4. **Publish** the APK and the Windows installer on GitHub Releases next to the Mac DMG.
 
+## Outcome on Windows (2026-11-20, v0.11.0)
+
+| Item | What was done |
+|---|---|
+| `kRequiredAppVersion` | Raised to 10 (`windows-sender/src/main.cpp`). |
+| `REQUIRED_APP_VERSION` | Raised to 10 with an updated comment (`installers/mac/build-dmg.sh`, edited only; not run). `APP_VERSION` there is still `0.10.0`: bump it when the DMG is rebuilt on the Mac. |
+| `versionName` | `0.11.0` (versionCode stays 10). Installer `AppVersion` is `0.11.0` too. |
+| README Windows names | The ZIP name is gone; Releases ship `ExtendedDisplaySetup-<version>.exe`. INSTALL.md says the same. |
+| `docs/mac.md`, `CHANGELOG.md` | Updated for the built v10. |
+| Launcher settings | The Windows launcher now remembers every option (`settings.ini`). |
+| Wrong pairing code on Windows | Before: the sender saw the tablet's instant closes as encoder failures. Now it prints `Pairing code mismatch …`, keeps retrying, and the GUI says the tablet needs the code. |
+| Stop on Windows | Verified: black screen + "Disconnected — waiting for the computer". Needed a receiver fix (late decoder frames lifted the cover). |
+| "Decoder reset" message | Left as is (shows 2.5 s, fades). It is only shown while video is on screen if the decoder recovers by itself, so holding the label up would cover a working picture. |
+| Tablet pairing box | Replaced by the prompt described in CHANGELOG v0.11.0. |
+
+Found on Windows; items 1–4 and 6 fixed in a follow-up commit (see the end of this list), 5 and 7 left:
+
+1. With a real second monitor attached, the sender picks the first non-primary display, so it streams that
+   monitor instead of the virtual display (and tries to set it to 2960x1848 and to SDR). Workaround: `--display N`.
+2. The sender's stdout is block-buffered when the launcher reads it, so most status lines arrive late; the GUI
+   can sit on "Starting…". The new pairing-mismatch lines are flushed.
+3. Stop in the launcher kills only the sender; ffmpeg normally exits when the virtual display goes away.
+4. With an encrypted host and **no** key on the tablet, the tablet drains frames on the open connection (by
+   design, so the picture appears without a reconnect). The host cannot tell, so it shows "Streaming" while
+   the tablet asks for the code. Only a *different* saved key is reported as a mismatch.
+5. Mac host: its mismatch text says the tablet "shows a code box at the top of the screen" (now a centred
+   prompt), and it still restarts the tablet app on every USB Start for v9's codec bug. Not changed here
+   (`mac-host/` is out of scope); harmless with v10.
+6. Long-pressing the tablet's status label while streaming also sends that touch to the computer.
+7. Over UDP the tablet still does not show "Disconnected" when the host stops (it cannot see a UDP stream end).
+
+Follow-up fixes:
+
+- **1:** the sender picks only the virtual display (recognised by its driver name / `MTT1337` id) and attaches
+  it itself; resolution and SDR changes apply only to it. A real monitor is used only with `--display N`, and
+  its mode is left alone. Verified with only the virtual display present; the HDMI case was not re-tested
+  after the change (the monitor had been unplugged).
+- **2:** sender output is unbuffered.
+- **3:** ffmpeg runs in a kill-on-close job object, so it exits whenever the sender does (verified by killing
+  only the sender).
+- **4:** a tablet with no key now asks for the code and closes the encrypted TCP connection, so both hosts
+  report it; the picture still appears by itself after the code is entered (7 s in the test).
+- **6:** a gesture that starts on the visible status label stays on the tablet.
+- **Left:** 5 is in `mac-host/` (out of scope). 7 needs a host heartbeat (a protocol change): a receiver
+  timeout alone would blank a still Mac desktop, which only sends frames on change.
+
 ## Known inconsistencies (found from the Mac; none fixed there)
 
 | Where | What is inconsistent |

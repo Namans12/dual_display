@@ -17,11 +17,12 @@
 #   - the Android receiver APK + darwin platform-tools (downloaded)
 set -euo pipefail
 
-# Receiver APK versionCode this host needs (v9: the touch server re-accepts a
-# reconnecting host immediately). Single source of truth: written into
+# Receiver APK versionCode this host needs (v10: frames presented at once, codec
+# re-detected per connection, screen blanked when the stream ends, pairing prompt
+# only when an encrypted stream needs it). Single source of truth: written into
 # Info.plist as EDRequiredAppVersion, which the launcher reads at run time to
 # decide whether to install/upgrade the bundled APK on the tablet.
-REQUIRED_APP_VERSION=9
+REQUIRED_APP_VERSION=10
 APP_VERSION="0.10.0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

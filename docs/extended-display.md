@@ -3,13 +3,14 @@
 ## Display Lifecycle (how it stays clean)
 
 The virtual display exists **only while a session is active**. After the tablet
-connects, the sender extends the Windows desktop onto the VirtualDrivers VDD
-monitor via the CCD topology API (`SetDisplayConfig` EXTEND); on exit — including
-Ctrl+C, window close, and even an unexpected fault — it collapses back to the
-primary display (`SetDisplayConfig` INTERNAL). No elevation is needed at run time
+connects, the sender attaches the VirtualDrivers VDD monitor to the desktop
+(right of the primary, 2960×1848; `SetDisplayConfig` EXTEND as a fallback); on
+exit — Ctrl+C, window close, an unexpected fault — it detaches only that monitor,
+leaving real monitors as they are. If the sender is killed outright (the launcher's
+Stop, Task Manager) ffmpeg is killed with it, and the launcher disables the driver. No elevation is needed at run time
 and no phantom monitor is left behind when idle.
 
-The sender is extended-only: it captures the first **non-primary** display.
+The sender captures **only the virtual display** (it shows as `virtual` in `--list-displays`). A real monitor (HDMI, USB-C, a dummy plug) is never picked or reconfigured automatically; to stream one, pass `--display N`, and its resolution is left as it is.
 
 ## The Normal Path (automatic)
 
@@ -25,13 +26,15 @@ display automatically before streaming.
 ## Alternative — HDMI Dummy Plug (zero software)
 
 A $5–10 "headless display / EDID emulator" dongle in an unused HDMI port gives
-Windows a real second monitor with no driver. Set it to *Extend*; the sender
-picks the non-primary display automatically.
+Windows a real second monitor with no driver. Set it to *Extend* and start the
+sender with `--display N` (index from `--list-displays`); since v0.11.0 it is no
+longer picked automatically.
 
 ## Diagnosing "No extended display available" (exit 2)
 
 1. Run `ExtendedDisplaySender.exe --list-displays`. After the sender has tried to
-   activate it you want a non-`primary` row (the VDD shows as `Virtual Display Driver`).
+   activate it you want a row flagged `virtual`. No such row: the driver is missing or
+   disabled (start from `ExtendedDisplay.exe`, which enables it).
 2. Driver not installed? Re-run the installer with the **virtual display driver**
    task ticked (it runs `install-vdd.ps1`: trusts the cert, `pnputil`/`devcon`
    installs the driver, writes the config).
