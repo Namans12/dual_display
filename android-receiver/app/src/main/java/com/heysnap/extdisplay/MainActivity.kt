@@ -129,10 +129,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var rootLayout: FrameLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var statusView: TextView
-    // Opaque black sheet over the video, shown whenever there is no live
-    // picture. Without it the last decoded frame stayed on screen after the host
-    // stopped, looking like a frozen desktop.
-    private lateinit var idleCover: View
+    // Opaque idle screen (gradient backdrop, app name, status, hint) over the
+    // video, shown whenever there is no live picture. Without it the last decoded
+    // frame stayed on screen after the host stopped, looking like a frozen desktop.
+    private lateinit var idleCover: FrameLayout
+    private lateinit var idleStatus: TextView
+    private lateinit var forgetButton: TextView
     // Pairing prompt: a centred card over a dimmed screen. Hidden unless an
     // encrypted stream has arrived that this tablet cannot open.
     private lateinit var pairOverlay: FrameLayout
@@ -162,8 +164,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun showStatus(text: String) {
         statusView.removeCallbacks(hideStatus)
         statusView.text = text
-        statusView.visibility = View.VISIBLE
-        if (videoShowing) statusView.postDelayed(hideStatus, STATUS_LINGER_MS)
+        idleStatus.text = text
+        if (videoShowing) {
+            statusView.visibility = View.VISIBLE
+            statusView.postDelayed(hideStatus, STATUS_LINGER_MS)
+        }   // otherwise the idle screen shows it
     }
 
     private fun setVideoShowing(showing: Boolean) {
@@ -175,7 +180,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             if (!pairChecking) hidePairPrompt()
             statusView.postDelayed(hideStatus, STATUS_LINGER_MS)
         } else {
-            statusView.visibility = View.VISIBLE
+            statusView.visibility = View.GONE   // the idle screen carries the status
         }
     }
 
@@ -183,6 +188,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         super.onCreate(savedInstanceState)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Edge to edge, including under the camera cut-out.
+        window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = if (android.os.Build.VERSION.SDK_INT >= 30)
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
 
         surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(this)
@@ -214,13 +225,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             setBackgroundColor(0x99000000.toInt())
             textSize = 14f
             setPadding(18, 10, 18, 10)
-            // Long-press: forget the saved pairing code (after a confirmation).
-            setOnLongClickListener { confirmForgetPairing(); true }
+            visibility = View.GONE          // shown only briefly while video is up
         }
+        idleCover = buildIdleScreen(statusView.text.toString())
 
         pairOverlay = buildPairPrompt()
-
-        idleCover = View(this).apply { setBackgroundColor(0xFF000000.toInt()) }
 
         rootLayout = FrameLayout(this).apply {
             setBackgroundColor(0xFF000000.toInt())
@@ -261,6 +270,88 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
+
+    // ------------------------------------------------------------ idle screen
+
+    private fun buildIdleScreen(initialStatus: String): FrameLayout {
+        val name = TextView(this).apply {
+            text = "Extended Display"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 64f
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+            letterSpacing = 0.02f
+            gravity = Gravity.CENTER
+            setShadowLayer(dp(18).toFloat(), 0f, dp(2).toFloat(), 0x66100830)
+        }
+        val rule = View(this).apply {
+            background = GradientDrawable().apply {
+                setColor(0x59FFFFFF)
+                cornerRadius = dp(2).toFloat()
+            }
+        }
+        idleStatus = TextView(this).apply {
+            text = initialStatus
+            setTextColor(0xE6FFFFFF.toInt())
+            textSize = 22f
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            letterSpacing = 0.01f
+            gravity = Gravity.CENTER
+        }
+        val hint = TextView(this).apply {
+            text = "Connect with USB-C, or the same Wi-Fi"
+            setTextColor(0x99FFFFFF.toInt())
+            textSize = 16f
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            letterSpacing = 0.02f
+            gravity = Gravity.CENTER
+        }
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            // Full-width rows with centred text: a shrink-wrapped column measured
+            // the title narrower than its text and wrapped "Display" out of view.
+            val row = { LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
+            addView(name, row())
+            addView(rule, LinearLayout.LayoutParams(dp(56), dp(2)).apply {
+                topMargin = dp(22); bottomMargin = dp(26)
+            })
+            addView(idleStatus, row())
+            addView(hint, row().apply { topMargin = dp(10) })
+        }
+        // Forget-pairing lives here, away from the picture, so it can never take
+        // a touch meant for the computer. Shown only while a code is saved.
+        forgetButton = TextView(this).apply {
+            text = "Forget pairing"
+            setTextColor(0x99FFFFFF.toInt())
+            textSize = 14f
+            letterSpacing = 0.04f
+            gravity = Gravity.CENTER
+            setPadding(dp(22), dp(12), dp(22), dp(12))
+            background = GradientDrawable().apply {
+                setColor(0x14FFFFFF)
+                cornerRadius = dp(24).toFloat()
+                setStroke(dp(1), 0x33FFFFFF)
+            }
+            visibility = if (pairingKey != null) View.VISIBLE else View.GONE
+            setOnClickListener { confirmForgetPairing() }
+        }
+        return FrameLayout(this).apply {
+            addView(IdleView(this@MainActivity), FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            addView(column, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER))
+            addView(forgetButton, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(40) })
+        }
+    }
+
+    private fun updateForgetButton() {
+        if (::forgetButton.isInitialized)
+            forgetButton.visibility = if (pairingKey != null) View.VISIBLE else View.GONE
+    }
 
     // ------------------------------------------------------------ pairing prompt
     //
@@ -409,7 +500,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         pairInput.setText("")
         pairOverlay.visibility = View.VISIBLE
         pairInput.requestFocus()
-        pairInput.post { inputMethod().showSoftInput(pairInput, 0) }
+        pairInput.post { inputMethod().showSoftInput(pairInput, 0); hideSystemUi() }
+        pairInput.postDelayed({ if (pairPromptVisible()) hideSystemUi() }, 400)
         Log.i(TAG, "Pairing prompt shown (${if (reason == PAIR_WRONG_SAVED) "saved key does not match" else "no key"})")
     }
 
@@ -450,10 +542,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             pairInput.isEnabled = true
             pairInput.setText("")
             pairInput.requestFocus()
-            pairInput.post { inputMethod().showSoftInput(pairInput, 0) }
+            pairInput.post { inputMethod().showSoftInput(pairInput, 0); hideSystemUi() }
+            pairInput.postDelayed({ if (pairPromptVisible()) hideSystemUi() }, 400)
             return
         }
         pairingKey = key
+        updateForgetButton()
         touchUplink.setKey(key)     // touch encrypts per-packet (reads key live)
         audioReceiver.setKey(key)   // audio decrypts per-frame (reads key live)
         receiver?.setKey(key)       // video decrypts per-frame
@@ -475,20 +569,34 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             Toast.makeText(this, "No pairing code is saved on this tablet.", Toast.LENGTH_SHORT).show()
             return
         }
-        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        val dialog = android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("Forget the saved pairing code?")
             .setMessage("The tablet will ask for the code again the next time a computer " +
                 "streams with Encrypt on. Streaming without Encrypt is not affected.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Forget") { _, _ -> forgetPairing() }
             .setOnDismissListener { hideSystemUi() }
-            .show()
+            .create()
+        // Not focusable while it is being shown, so the system bars never flash
+        // back in; immersive flags go on the dialog's own window, then focus returns.
+        dialog.window?.setFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+        dialog.show()
+        dialog.window?.let { w ->
+            applyImmersive(w)
+            w.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            applyImmersive(w)   // again, now that the window can take focus
+            w.decorView.viewTreeObserver.addOnWindowFocusChangeListener { focused ->
+                if (focused) applyImmersive(w)
+            }
+        }
     }
 
     // Really forgets: the key in use AND the saved copy. (Before, clearing the key
     // in memory left the saved one, which came back on the next start.)
     private fun forgetPairing() {
         pairingKey = null
+        updateForgetButton()
         pairProbe = null
         touchUplink.setKey(null)
         audioReceiver.setKey(null)
@@ -517,19 +625,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         // While the pairing prompt is up, touches are for the prompt, not the host.
         if (pairPromptVisible()) return super.dispatchTouchEvent(event)
-        // A gesture that starts on the visible status label is for the label
-        // (long-press = forget the pairing code), not for the computer.
-        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            labelGesture = statusView.visibility == View.VISIBLE &&
-                event.x >= statusView.left && event.x < statusView.right &&
-                event.y >= statusView.top && event.y < statusView.bottom
-        }
-        if (labelGesture) {
-            val handled = super.dispatchTouchEvent(event)
-            if (event.actionMasked == MotionEvent.ACTION_UP ||
-                event.actionMasked == MotionEvent.ACTION_CANCEL) labelGesture = false
-            return handled
-        }
+        // The idle screen has its own controls; nothing is sent to the computer then.
+        if (!videoShowing) return super.dispatchTouchEvent(event)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
                 sendPointer(event, event.actionIndex, 0)
@@ -550,13 +647,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             MotionEvent.ACTION_HOVER_EXIT -> 5
             else -> -1
         }
-        if (type >= 0 && !pairPromptVisible()) sendPointer(event, 0, type)
+        if (type >= 0 && videoShowing && !pairPromptVisible()) sendPointer(event, 0, type)
         return super.onGenericMotionEvent(event)
     }
 
     private val locBuf = IntArray(2)
     private var loggedFirstTouch = false
-    private var labelGesture = false
 
     /**
      * Emits one v2 packet for pointer [i] of [event]. Coordinates are window-
@@ -641,13 +737,22 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         super.onDestroy()
     }
 
+    // Bumped on every surface create/destroy; callbacks from a receiver that belongs
+    // to an older surface are ignored.
+    private var surfaceEpoch = 0
+
     override fun surfaceCreated(holder: SurfaceHolder) {
         receiver?.stop()
+        val epoch = ++surfaceEpoch
+        // A new surface is blank: show the idle screen until a frame arrives.
+        setVideoShowing(false)
         receiver = H264TcpReceiver(
             surface = holder.surface,
-            onStatus = { status -> runOnUiThread { showStatus(status) } },
-            onVideoShowing = { showing -> runOnUiThread { setVideoShowing(showing) } },
-            onVideoSize = { w, h -> runOnUiThread { applyVideoSize(w, h) } },
+            onStatus = { status -> runOnUiThread { if (epoch == surfaceEpoch) showStatus(status) } },
+            onVideoShowing = { showing ->
+                runOnUiThread { if (epoch == surfaceEpoch) setVideoShowing(showing) }
+            },
+            onVideoSize = { w, h -> runOnUiThread { if (epoch == surfaceEpoch) applyVideoSize(w, h) } },
             onEncrypted = { enc ->
                 touchUplink.setKey(if (enc) pairingKey else null)
                 // A plaintext session needs no code: make sure no prompt is up.
@@ -658,27 +763,48 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        surfaceEpoch++
         receiver?.stop()
         receiver = null
+        // Whatever was on the surface is gone (Home, lock): back to the idle screen.
+        setVideoShowing(false)
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
 
-    private fun hideSystemUi() {
-        window.decorView.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+    private fun hideSystemUi() = applyImmersive(window)
 
+    // Edge-to-edge with both bars hidden; a swipe from the edge shows them
+    // transiently and they hide again by themselves. Used for the activity window
+    // and for every dialog window.
+    private fun applyImmersive(w: Window) {
         if (android.os.Build.VERSION.SDK_INT >= 30) {
-            window.insetsController?.let {
-                it.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+            @Suppress("DEPRECATION")
+            w.setDecorFitsSystemWindows(false)
+            w.insetsController?.let {
                 it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                it.hide(WindowInsets.Type.systemBars())
             }
+        } else {
+            @Suppress("DEPRECATION")
+            w.decorView.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
         }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemUi()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        hideSystemUi()
     }
 }
 
@@ -773,7 +899,11 @@ private class H264TcpReceiver(
     // A NAL the decode thread had already taken from the queue when it noticed
     // the generation change; handed to the next session so the new stream's
     // first parameter set is not lost. Decode thread only.
-    private var carriedNal: ByteArray? = null
+    private var carriedNal: QNal? = null
+
+    // A NAL tagged with the stream generation it was queued under, so the decode
+    // thread can tell a new stream's NAL from a leftover of the previous one.
+    private class QNal(val gen: Int, val data: ByteArray)
 
     private fun setShowing(showing: Boolean) {
         if (videoShowing != showing) {
@@ -808,20 +938,23 @@ private class H264TcpReceiver(
     // Both transports push complete NAL units here; one decode loop consumes
     // them, so the host can use TCP (reliable) or UDP (low latency) and the app
     // handles whichever arrives.
-    private val nalQueue = LinkedBlockingQueue<ByteArray>(2048)
+    private val nalQueue = LinkedBlockingQueue<QNal>(2048)
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
         thread(name = "tcp-feeder") { tcpLoop() }
         thread(name = "udp-feeder") { udpLoop() }
-        thread(name = "decode-loop") { decodeLoop() }
+        decodeThread = thread(name = "decode-loop") { decodeLoop() }
         onStatus("Listening (TCP/UDP $LISTEN_PORT)")
     }
 
+    private var decodeThread: Thread? = null
+
     fun stop() {
-        // Only flip the flag + unblock the I/O threads. The decode thread owns
-        // the codec and releases it itself when `running` goes false (avoids a
-        // cross-thread release race against in-flight dequeue/queue calls).
+        // Flip the flag, unblock the I/O threads and wake the decode thread. The
+        // decode thread owns the codec and releases it itself (avoids a
+        // cross-thread release race); we wait briefly for that so the decoder is
+        // gone before the Surface it renders to is.
         running.set(false)
         closeServer()
         try {
@@ -829,6 +962,12 @@ private class H264TcpReceiver(
         } catch (_: Exception) {
         }
         nalQueue.clear()
+        decodeThread?.let { t ->
+            if (t !== Thread.currentThread()) {
+                t.interrupt()
+                try { t.join(1500) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+            }
+        }
     }
 
     // TCP transport: accept a connection and feed its NALs into the queue.
@@ -844,8 +983,13 @@ private class H264TcpReceiver(
                 server!!.accept().use { socket ->
                     accepted = true
                     socket.tcpNoDelay = true
-                    nalQueue.clear()  // leftovers of the previous stream
-                    streamGeneration.incrementAndGet()
+                    // Clear and bump together, so no leftover of the previous stream
+                    // can be taken for this one. Everything this connection queues
+                    // carries [myGen].
+                    val myGen = synchronized(streamGeneration) {
+                        nalQueue.clear()
+                        streamGeneration.incrementAndGet()
+                    }
                     onStatus("Connected (USB/TCP): ${socket.inetAddress.hostAddress}")
                     // Peek 4 bytes. Encrypted streams begin with the 'EXVE' marker;
                     // plaintext streams begin with an Annex-B start code (push those
@@ -903,7 +1047,7 @@ private class H264TcpReceiver(
                                 break
                             }
                             opened = true
-                            nalQueue.put(nal)
+                            nalQueue.put(QNal(myGen, nal))
                         }
                     } else {
                         onEncrypted(false)  // plaintext session (e.g. saved key, Encrypt off)
@@ -911,7 +1055,7 @@ private class H264TcpReceiver(
                         val splitter = AnnexBNalSplitter(pin)
                         while (running.get()) {
                             val nal = splitter.nextNal() ?: break
-                            nalQueue.put(nal)
+                            nalQueue.put(QNal(myGen, nal))
                         }
                     }
                 }
@@ -952,14 +1096,14 @@ private class H264TcpReceiver(
                     if (!running.get()) return@UdpReassembler
                     if (startsWithStartCode(blob)) {
                         if (udpMode != 2) { udpMode = 2; onEncrypted(false) }
-                        nalQueue.offer(blob)
+                        nalQueue.offer(QNal(streamGeneration.get(), blob))
                         return@UdpReassembler
                     }
                     val s = videoSealer
                     val pt = s?.open(blob, 0, blob.size)
                     if (pt != null) {
                         if (udpMode != 1) { udpMode = 1; failures = 0; onEncrypted(true) }
-                        nalQueue.offer(pt)
+                        nalQueue.offer(QNal(streamGeneration.get(), pt))
                         return@UdpReassembler
                     }
                     // Sealed, and not openable: no key, or a different pairing code
@@ -1010,52 +1154,114 @@ private class H264TcpReceiver(
     }
 
     // A decode session may only begin at a parameter set: H.264 SPS (type 7) or
-    // HEVC VPS/SPS/PPS (32-34). Anything else can neither identify the codec nor
-    // be decoded yet, so it is skipped until one arrives (hosts send them with
-    // every keyframe). H.264 PPS (8) is deliberately not accepted: an HEVC IDR's
-    // first byte also reads as 8 under the H.264 mask.
+    // HEVC VPS (32). Anything else can neither identify the codec nor be decoded
+    // yet, so it is skipped until one arrives (hosts send them with every
+    // keyframe). H.264 PPS (8) is deliberately not accepted: an HEVC IDR's first
+    // byte also reads as 8 under the H.264 mask. HEVC SPS/PPS are not accepted
+    // either: a stream that lost its VPS waits for the next keyframe.
     private fun startsStream(nal: ByteArray): Boolean {
         val sc = if (nal.size >= 4 && nal[2] == 0.toByte()) 4 else 3
         if (nal.size <= sc) return false
         val header = nal[sc].toInt() and 0xFF
         if (header and 0x80 != 0) return false
         val hevcType = (header shr 1) and 0x3F
-        return hevcType in 32..34 || (header and 0x1F) == 7
+        return hevcType == 32 || (header and 0x1F) == 7
+    }
+
+    // Parameter sets of [mime]: H.264 SPS/PPS (7, 8), HEVC VPS/SPS/PPS (32-34).
+    private fun isParamSet(nal: ByteArray, mime: String): Boolean {
+        val sc = if (nal.size >= 4 && nal[2] == 0.toByte()) 4 else 3
+        if (nal.size <= sc) return false
+        val header = nal[sc].toInt() and 0xFF
+        return if (mime == MIME_HEVC) ((header shr 1) and 0x3F) in 32..34
+        else (header and 0x1F) in 7..8
     }
 
     // Consumes NALs from the shared queue (fed by TCP or UDP) and decodes them.
     // Resets the codec on error (e.g. surface loss) and resumes.
     private fun decodeLoop() {
-        while (running.get()) {
-            try {
-                decodeSession()  // releases its own codec in a finally
-            } catch (ex: Exception) {
-                if (running.get()) {
-                    onStatus("Decoder reset: ${ex.message ?: ex.javaClass.simpleName}")
-                    Thread.sleep(300)
+        try {
+            while (running.get()) {
+                try {
+                    decodeSession()
+                } catch (ex: Exception) {
+                    // Whatever went wrong, do not trust the decoder again.
+                    releaseDecoder()
+                    if (running.get()) {
+                        onStatus("Decoder reset: ${ex.message ?: ex.javaClass.simpleName}")
+                        Thread.sleep(300)
+                    }
                 }
             }
+        } finally {
+            releaseDecoder()
         }
+    }
+
+    // The decoder outlives a stream: a new host connection flush()es it instead of
+    // paying for create/configure/start again. It is rebuilt only when the codec
+    // (H.264 <-> HEVC) or the leading parameter set (so, possibly, the picture size)
+    // differs from the one it was configured with. Decode thread only.
+    private var liveDecoder: MediaCodec? = null
+    private var liveMime: String? = null
+    private var liveHeader: ByteArray? = null
+
+    private fun releaseDecoder() {
+        val d = liveDecoder ?: return
+        try { d.stop() } catch (_: Exception) {}
+        try { d.release() } catch (_: Exception) {}
+        if (codec === d) codec = null
+        liveDecoder = null
+        liveMime = null
+        liveHeader = null
     }
 
     private fun decodeSession() {
         // Wait for a parameter set to pick H.264 vs HEVC (no codec header needed).
-        var firstNal: ByteArray? = null
-        while (running.get() && firstNal == null) {
+        // A NAL from an older generation is a leftover of a finished stream: drop it.
+        var firstQ: QNal? = null
+        while (running.get() && firstQ == null) {
             val candidate = carriedNal ?: nalQueue.poll(500, TimeUnit.MILLISECONDS)
             carriedNal = null
-            if (candidate != null && startsStream(candidate)) firstNal = candidate
+            if (candidate != null && candidate.gen == streamGeneration.get() &&
+                startsStream(candidate.data)) firstQ = candidate
         }
-        val first = firstNal ?: return
-        val generation = streamGeneration.get()
+        val fq = firstQ ?: return
+        val first = fq.data
+        val generation = fq.gen          // the generation the NAL was queued under
         val mime = detectCodec(first)
 
-        val decoder = MediaCodec.createDecoderByType(mime)
+        // Collect the leading run of parameter sets (VPS+SPS+PPS / SPS+PPS). It
+        // identifies the stream for decoder reuse, and is fed to the decoder first.
+        val pending = java.util.ArrayDeque<ByteArray>()
+        pending.add(first)
+        var header = first
+        while (running.get()) {
+            val q = nalQueue.poll(40, TimeUnit.MILLISECONDS) ?: break
+            if (q.gen != generation) {
+                if (q.gen == streamGeneration.get()) carriedNal = q
+                return                      // the stream changed under us: start over
+            }
+            pending.add(q.data)
+            if (!isParamSet(q.data, mime)) break
+            header += q.data
+        }
+        if (streamGeneration.get() != generation) return
+
+        // The decode thread is the SOLE owner of the codec; stop() only flips
+        // `running`, so there is no cross-thread stop()/release() race against the
+        // dequeue/queue calls below. decodeLoop releases it when the receiver ends.
+        var reused: MediaCodec? = null
+        liveDecoder?.let { d ->
+            if (liveMime == mime && liveHeader?.contentEquals(header) == true) {
+                try { d.flush(); reused = d } catch (_: Exception) { releaseDecoder() }
+            } else {
+                releaseDecoder()
+            }
+        }
+        val decoder = reused ?: MediaCodec.createDecoderByType(mime)
         codec = decoder
-        // The decode thread is the SOLE owner of the codec — it always releases
-        // it here. stop() only flips `running`, so there is no cross-thread
-        // stop()/release() race against the dequeue/queue calls below.
-        try {
+        if (reused == null) {
             val format = MediaFormat.createVideoFormat(mime, INITIAL_WIDTH, INITIAL_HEIGHT).apply {
                 if (android.os.Build.VERSION.SDK_INT >= 30) {
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
@@ -1065,49 +1271,63 @@ private class H264TcpReceiver(
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
             }
-            decoder.configure(format, surface, null, 0)
-            decoder.start()
-            onStatus("Decoding ${if (mime == MIME_HEVC) "HEVC" else "H.264"}")
-
-            val info = MediaCodec.BufferInfo()
-            var nal: ByteArray? = first  // feed the peeked NAL first
-            while (running.get()) {
-                // Short poll, and drain on every idle wake-up: a frame finishes
-                // decoding a few ms AFTER its NAL is queued, so the drain right
-                // after queueInputBuffer misses it. Waiting for the next NAL to
-                // drain left the newest frame undisplayed whenever the host
-                // paused (the Mac host only sends frames when the screen changes).
-                val current = nal ?: nalQueue.poll(4, TimeUnit.MILLISECONDS)
-                if (streamGeneration.get() != generation) {
-                    // A new host connection started: end this session (the
-                    // finally below releases the decoder) and let the next one
-                    // pick the codec again.
-                    carriedNal = current
-                    return
-                }
-                if (current == null) {
-                    drainOutput(decoder, info, generation)
-                    continue
-                }
-                nal = null
-                var queued = false
-                while (running.get() && !queued) {
-                    val inputIndex = decoder.dequeueInputBuffer(1_000)
-                    if (inputIndex >= 0) {
-                        decoder.getInputBuffer(inputIndex)?.apply { clear(); put(current) }
-                        // PTS 0 + render-at-vsync means MediaCodec never delays output.
-                        decoder.queueInputBuffer(inputIndex, 0, current.size, 0L, 0)
-                        queued = true
-                    } else {
-                        drainOutput(decoder, info, generation)
-                    }
-                }
-                drainOutput(decoder, info, generation)
+            try {
+                decoder.configure(format, surface, null, 0)
+                decoder.start()
+            } catch (ex: Exception) {
+                try { decoder.release() } catch (_: Exception) {}
+                codec = null
+                throw ex
             }
-        } finally {
-            try { decoder.stop() } catch (_: Exception) {}
-            try { decoder.release() } catch (_: Exception) {}
-            if (codec === decoder) codec = null
+            liveDecoder = decoder
+            liveMime = mime
+            liveHeader = header
+        }
+        if (streamGeneration.get() == generation) {
+            onStatus("Decoding ${if (mime == MIME_HEVC) "HEVC" else "H.264"}")
+        }
+
+        val info = MediaCodec.BufferInfo()
+        while (running.get()) {
+            // Short poll, and drain on every idle wake-up: a frame finishes
+            // decoding a few ms AFTER its NAL is queued, so the drain right
+            // after queueInputBuffer misses it. Waiting for the next NAL to
+            // drain left the newest frame undisplayed whenever the host
+            // paused (the Mac host only sends frames when the screen changes).
+            var current: ByteArray? = pending.pollFirst()   // parameter sets first
+            var q: QNal? = null
+            if (current == null) q = nalQueue.poll(4, TimeUnit.MILLISECONDS)
+            val now = streamGeneration.get()
+            if (now != generation) {
+                // A new host connection started: end this session. The decoder
+                // stays alive; the next session flushes it, or rebuilds it if
+                // the codec / parameter sets changed. Only a NAL of the NEW
+                // generation is carried over; anything older is dropped.
+                if (q != null && q.gen == now) carriedNal = q
+                return
+            }
+            if (q != null) {
+                if (q.gen != generation) continue   // stale leftover
+                current = q.data
+            }
+            val nal = current
+            if (nal == null) {
+                drainOutput(decoder, info, generation)
+                continue
+            }
+            var queued = false
+            while (running.get() && !queued) {
+                val inputIndex = decoder.dequeueInputBuffer(1_000)
+                if (inputIndex >= 0) {
+                    decoder.getInputBuffer(inputIndex)?.apply { clear(); put(nal) }
+                    // PTS 0 + render-at-vsync means MediaCodec never delays output.
+                    decoder.queueInputBuffer(inputIndex, 0, nal.size, 0L, 0)
+                    queued = true
+                } else {
+                    drainOutput(decoder, info, generation)
+                }
+            }
+            drainOutput(decoder, info, generation)
         }
     }
 

@@ -21,18 +21,22 @@
 #include <bcrypt.h>
 #include <mmdeviceapi.h>   // WASAPI: IMMDeviceEnumerator (desktop-audio loopback)
 #include <audioclient.h>   // WASAPI: IAudioClient / IAudioCaptureClient
+#include <audioclientactivationparams.h> // process loopback (Windows 10 2004+)
 #include <endpointvolume.h> // IAudioEndpointVolume (optional "mute PC while streaming")
 #include <mmreg.h>         // WAVE_FORMAT_* tags for the mix format
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -179,6 +183,9 @@ struct Options {
     bool muteLocal = false;      // mute the PC's own speakers while streaming audio
     int audioDelayMs = 40;       // tablet audio buffer/latency for A/V sync (bigger = later)
     bool listDisplays = false;
+    bool cleanup = false;        // switch the virtual screen off, un-mute, exit
+    bool audioTest = false;      // dev: process loopback with the speakers muted, print peak
+    bool screenTest = false;     // dev: screen on, list, wait 3 s, screen off, list
 };
 
 struct DisplayInfo {
@@ -240,29 +247,36 @@ void sleepInterruptible(DWORD ms) {
     }
 }
 
-void collapseToInternal();  // defined below; needed by the ctrl handler
+bool virtualScreenOff(const char* reason, bool announce = true, bool force = false);  // below
+void restoreLocalMuteIfNeeded();  // below
+
+// Common stop: what Ctrl+C, closing the console and the launcher's stop event all do.
+void requestStop(const char* reason) {
+    g_stop.store(true);
+    // Atomically claim the handle so we never race main's CloseHandle.
+    HANDLE child = g_child.exchange(nullptr);
+    if (child) {
+        TerminateProcess(child, 1);
+    }
+    virtualScreenOff(reason);
+}
 
 BOOL WINAPI consoleCtrlHandler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT ||
         type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT) {
-        g_stop.store(true);
-        // Atomically claim the handle so we never race main's CloseHandle.
-        HANDLE child = g_child.exchange(nullptr);
-        if (child) {
-            TerminateProcess(child, 1);
-        }
+        requestStop("stopped");
         // On close/logoff the process dies when this handler returns, so the
-        // display must be released here, not in main().
-        collapseToInternal();
+        // speakers must be restored here, not in main().
+        if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT) restoreLocalMuteIfNeeded();
         return TRUE;
     }
     return FALSE;
 }
 
-// Last-resort: if the process faults, still collapse the virtual display so it
+// Last-resort: if the process faults, still switch the virtual screen off so it
 // isn't left extended onto a non-existent tablet.
 LONG WINAPI crashHandler(EXCEPTION_POINTERS*) {
-    collapseToInternal();
+    virtualScreenOff("sender crashed");
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -460,110 +474,330 @@ std::optional<DisplayInfo> pickExtendedDisplay(const std::vector<DisplayInfo>& d
     return std::nullopt;
 }
 
-// Virtual display lifecycle via the VirtualDrivers VDD (IddCx) + the Windows
-// CCD topology API. The VDD's monitor exists once the driver is installed but
-// stays INACTIVE until we extend onto it; collapsing back to INTERNAL detaches
-// it. Both transitions run in the user session with NO elevation, and there is
-// no phantom display while idle. This replaces the old Amyuni enable + SYSTEM
-// watcher + flag-file design entirely.
+// ------------------------------------------------------------ virtual screen
 //
-// SDC flags (winuser.h): SDC_APPLY 0x80, SDC_TOPOLOGY_INTERNAL 0x01,
-// SDC_TOPOLOGY_EXTEND 0x04. Topology flags must NOT be combined with
-// SDC_SAVE_TO_DATABASE/SDC_ALLOW_CHANGES (returns ERROR_INVALID_PARAMETER).
-std::atomic<bool> g_vddExtended{false};
+// The launcher loads the VirtualDrivers VDD (IddCx) when its app opens and unloads
+// it when the app closes. While the driver is loaded but its screen is off it costs
+// nothing. THIS sender owns the screen: it switches the virtual display's own CCD
+// path on when a tablet is found and off again when the stream ends or the tablet
+// has been gone for a few seconds. Every other active path is passed back to
+// SetDisplayConfig unchanged, so real monitors (laptop panel, HDMI) are never
+// moved, re-moded or disabled. Nothing is persisted: no registry update, no saved
+// display database entry, no topology presets. No admin rights are needed.
+constexpr UINT32 kIdxInvalid = 0xffffffffu;  // DISPLAYCONFIG_PATH_MODE_IDX_INVALID
+constexpr ULONGLONG kTabletGoneMs = 5000;
 
-// Deactivates ONLY the virtual display's CCD path, leaving every real monitor
-// active. This is the safe way to release the VDD: SDC_TOPOLOGY_INTERNAL forces
-// the laptop's internal panel and would drop any real external monitor the user
-// has attached. Non-elevated (a path change needs no admin), so it also works
-// when the sender is run directly from the CLI.
-bool detachVirtualDisplay() {
-    // First the counterpart of attachVirtualDisplay(): a zero-size mode with
-    // CDS_UPDATEREGISTRY removes it from the desktop and from the saved layout,
-    // so it does not come back by itself (it stayed listed in Settings before).
-    DISPLAY_DEVICEA dd{};
-    dd.cb = sizeof(dd);
-    for (DWORD i = 0; EnumDisplayDevicesA(nullptr, i, &dd, 0); ++i) {
-        if (!isVirtualDisplayDevice(dd.DeviceName)) continue;
-        if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) return true;
-        DEVMODEA mode{};
-        mode.dmSize = sizeof(mode);
-        mode.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
-        if (ChangeDisplaySettingsExA(dd.DeviceName, &mode, nullptr,
-                                     CDS_UPDATEREGISTRY | CDS_NORESET, nullptr) == DISP_CHANGE_SUCCESSFUL &&
-            ChangeDisplaySettingsExA(nullptr, nullptr, nullptr, 0, nullptr) == DISP_CHANGE_SUCCESSFUL) {
-            return true;
-        }
-        break;
-    }
+using CcdPath = DISPLAYCONFIG_PATH_INFO;
+using CcdMode = DISPLAYCONFIG_MODE_INFO;
 
-    UINT32 numPath = 0, numMode = 0;
-    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &numPath, &numMode) != ERROR_SUCCESS) {
-        return false;
-    }
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(numPath);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(numMode);
-    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &numPath, paths.data(),
-                           &numMode, modes.data(), nullptr) != ERROR_SUCCESS) {
-        return false;
-    }
+struct ScreenMode {
+    UINT32 w = 0, h = 0, hz = 0;  // hz 0 = leave the refresh rate to Windows
+};
 
-    bool found = false;
-    for (UINT32 i = 0; i < numPath; ++i) {
-        DISPLAYCONFIG_TARGET_DEVICE_NAME tgt{};
-        tgt.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-        tgt.header.size = sizeof(tgt);
-        tgt.header.adapterId = paths[i].targetInfo.adapterId;
-        tgt.header.id = paths[i].targetInfo.id;
-        if (DisplayConfigGetDeviceInfo(&tgt.header) != ERROR_SUCCESS) continue;
-        // The VirtualDrivers VDD monitor reports hardware id "MTT1337" in its
-        // device path and "VDD" in its friendly name.
-        const std::wstring devPath = tgt.monitorDevicePath;
-        const std::wstring friendly = tgt.monitorFriendlyDeviceName;
-        if (devPath.find(L"MTT1337") != std::wstring::npos ||
-            friendly.find(L"VDD") != std::wstring::npos) {
-            paths[i].flags &= ~DISPLAYCONFIG_PATH_ACTIVE;  // detach only this path
-            found = true;
-        }
-    }
-    if (!found) return false;
-    return SetDisplayConfig(numPath, paths.data(), numMode, modes.data(),
-                            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG |
-                            SDC_ALLOW_CHANGES) == ERROR_SUCCESS;
+enum class ScreenResult { Switched, Unchanged, NoDriver, Failed };
+enum class PrepResult { Ok, NoDriver, Failed };
+
+bool g_ccdVerbose = false;  // --screen-test: print each SetDisplayConfig return code
+std::mutex g_screenMutex;                 // serialises every CCD change
+std::atomic<bool> g_screenOwned{false};   // this process switched the screen on
+
+// The rectangle touch coordinates map onto. Updated each time the screen is
+// switched on or re-moded; the touch bridge reads it for every packet.
+std::mutex g_touchRectMutex;
+DisplayInfo g_touchDisplay;
+
+void setTouchDisplay(const DisplayInfo& d) {
+    std::lock_guard<std::mutex> lock(g_touchRectMutex);
+    g_touchDisplay = d;
 }
 
-void collapseToInternal() {
-    if (g_vddExtended.exchange(false)) {
-        // Detach only the VDD (keeps real external monitors). Fall back to
-        // internal-only if the VDD path can't be located for some reason.
-        if (!detachVirtualDisplay()) {
-            SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_INTERNAL);
+DisplayInfo getTouchDisplay() {
+    std::lock_guard<std::mutex> lock(g_touchRectMutex);
+    return g_touchDisplay;
+}
+
+bool queryConfig(UINT32 flags, std::vector<CcdPath>& paths, std::vector<CcdMode>& modes) {
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        UINT32 np = 0, nm = 0;
+        if (GetDisplayConfigBufferSizes(flags, &np, &nm) != ERROR_SUCCESS) return false;
+        paths.assign(np, CcdPath{});
+        modes.assign(nm, CcdMode{});
+        const LONG rc = QueryDisplayConfig(flags, &np, paths.data(), &nm, modes.data(), nullptr);
+        if (rc == ERROR_INSUFFICIENT_BUFFER) continue;  // config changed between the calls
+        if (rc != ERROR_SUCCESS) return false;
+        paths.resize(np);
+        modes.resize(nm);
+        return true;
+    }
+    return false;
+}
+
+// The VirtualDrivers VDD monitor reports hardware id "MTT1337" in its device path
+// and "VDD" in its friendly name; no real monitor does.
+bool isVddPath(const CcdPath& p) {
+    DISPLAYCONFIG_TARGET_DEVICE_NAME tgt{};
+    tgt.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+    tgt.header.size = sizeof(tgt);
+    tgt.header.adapterId = p.targetInfo.adapterId;
+    tgt.header.id = p.targetInfo.id;
+    if (DisplayConfigGetDeviceInfo(&tgt.header) != ERROR_SUCCESS) return false;
+    const std::wstring devPath = tgt.monitorDevicePath;
+    const std::wstring friendly = tgt.monitorFriendlyDeviceName;
+    return devPath.find(L"MTT1337") != std::wstring::npos ||
+           friendly.find(L"VDD") != std::wstring::npos;
+}
+
+DISPLAYCONFIG_SOURCE_MODE* sourceModeOf(const CcdPath& p, std::vector<CcdMode>& modes) {
+    const UINT32 idx = p.sourceInfo.modeInfoIdx;
+    if (idx == kIdxInvalid || idx >= modes.size() ||
+        modes[idx].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+        return nullptr;
+    }
+    return &modes[idx].sourceMode;
+}
+
+UINT32 refreshOf(const CcdPath& p, const std::vector<CcdMode>& modes) {
+    UINT32 num = p.targetInfo.refreshRate.Numerator, den = p.targetInfo.refreshRate.Denominator;
+    const UINT32 idx = p.targetInfo.modeInfoIdx;
+    if (idx != kIdxInvalid && idx < modes.size() &&
+        modes[idx].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET) {
+        const auto& v = modes[idx].targetMode.targetVideoSignalInfo.vSyncFreq;
+        if (v.Denominator != 0) { num = v.Numerator; den = v.Denominator; }
+    }
+    return den == 0 ? 0 : static_cast<UINT32>((static_cast<double>(num) / den) + 0.5);
+}
+
+bool rectsIntersect(const RECT& a, const RECT& b) {
+    return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+}
+
+bool virtualScreenActive() {
+    std::lock_guard<std::mutex> lock(g_screenMutex);
+    std::vector<CcdPath> paths;
+    std::vector<CcdMode> modes;
+    if (!queryConfig(QDC_ONLY_ACTIVE_PATHS, paths, modes)) return false;
+    for (const CcdPath& p : paths) if (isVddPath(p)) return true;
+    return false;
+}
+
+void fillTargetSignal(DISPLAYCONFIG_TARGET_MODE& t, const ScreenMode& want) {
+    auto& si = t.targetVideoSignalInfo;
+    si.pixelRate = static_cast<UINT64>(want.w) * want.h * want.hz;
+    si.hSyncFreq = {want.h * want.hz, 1};
+    si.vSyncFreq = {want.hz, 1};
+    si.activeSize = {want.w, want.h};
+    si.totalSize = {want.w, want.h};
+    si.videoStandard = 0;
+    si.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
+}
+
+// Brings the virtual screen to the wanted state in ONE SetDisplayConfig call:
+//  - off: switches its path on with the wanted size/refresh and a position to the
+//    right of the rightmost active display, top aligned with the primary (which is
+//    always at 0,0);
+//  - on but at another mode, or overlapping a display: changes just that.
+// "Unchanged" means it was already on at the full wanted mode (width, height and
+// refresh compared) without overlap, and nothing was sent.
+ScreenResult applyVirtualScreen(const ScreenMode& want, std::string& detail) {
+    std::lock_guard<std::mutex> lock(g_screenMutex);
+    std::vector<CcdPath> active;
+    std::vector<CcdMode> modes;
+    if (!queryConfig(QDC_ONLY_ACTIVE_PATHS, active, modes)) {
+        detail = "QueryDisplayConfig failed";
+        return ScreenResult::Failed;
+    }
+
+    int vdd = -1;
+    for (size_t i = 0; i < active.size(); ++i) {
+        if (isVddPath(active[i])) { vdd = static_cast<int>(i); break; }
+    }
+
+    LONG right = 0;
+    std::vector<RECT> others;
+    for (size_t i = 0; i < active.size(); ++i) {
+        if (static_cast<int>(i) == vdd) continue;
+        const DISPLAYCONFIG_SOURCE_MODE* sm = sourceModeOf(active[i], modes);
+        if (!sm) continue;
+        RECT r{sm->position.x, sm->position.y,
+               sm->position.x + static_cast<LONG>(sm->width),
+               sm->position.y + static_cast<LONG>(sm->height)};
+        others.push_back(r);
+        if (r.right > right) right = r.right;
+    }
+    const POINTL place{right, 0};
+    constexpr DWORD kFlags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES;
+
+    if (vdd >= 0) {
+        DISPLAYCONFIG_SOURCE_MODE* sm = sourceModeOf(active[vdd], modes);
+        if (!sm) {
+            detail = "virtual screen has no source mode";
+            return ScreenResult::Failed;
         }
-        std::cout << "Virtual display released.\n";
+        const UINT32 curHz = refreshOf(active[vdd], modes);
+        const bool modeOk = sm->width == want.w && sm->height == want.h &&
+                            (want.hz == 0 || curHz == want.hz);
+        const RECT me{sm->position.x, sm->position.y,
+                      sm->position.x + static_cast<LONG>(sm->width),
+                      sm->position.y + static_cast<LONG>(sm->height)};
+        bool overlap = false;
+        for (const RECT& o : others) overlap = overlap || rectsIntersect(me, o);
+        if (modeOk && !overlap) return ScreenResult::Unchanged;
+
+        sm->width = want.w;
+        sm->height = want.h;
+        if (overlap) sm->position = place;
+        const UINT32 tIdx = active[vdd].targetInfo.modeInfoIdx;
+        if (want.hz && tIdx != kIdxInvalid && tIdx < modes.size() &&
+            modes[tIdx].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET) {
+            fillTargetSignal(modes[tIdx].targetMode, want);  // same call, same entries
+            active[vdd].targetInfo.refreshRate = {want.hz, 1};
+        } else {
+            active[vdd].targetInfo.modeInfoIdx = kIdxInvalid;  // Windows rebuilds the timing
+        }
+        const LONG rc = SetDisplayConfig(static_cast<UINT32>(active.size()), active.data(),
+                                         static_cast<UINT32>(modes.size()), modes.data(), kFlags);
+        if (g_ccdVerbose) std::cout << "  SetDisplayConfig (re-mode) rc=" << rc << "\n";
+        if (rc != ERROR_SUCCESS) {
+            detail = "SetDisplayConfig (re-mode) failed, code " + std::to_string(rc);
+            return ScreenResult::Failed;
+        }
+        return ScreenResult::Switched;
+    }
+
+    // Off: find the VDD's inactive path whose source is not used by an active path.
+    std::vector<CcdPath> all;
+    std::vector<CcdMode> allModes;
+    if (!queryConfig(QDC_ALL_PATHS, all, allModes)) {
+        detail = "QueryDisplayConfig (all paths) failed";
+        return ScreenResult::Failed;
+    }
+    bool sawVdd = false;
+    for (const CcdPath& p : all) {
+        if (!isVddPath(p)) continue;
+        sawVdd = true;
+        if (!p.targetInfo.targetAvailable) continue;
+        bool used = false;
+        for (const CcdPath& a : active) {
+            used = used || (a.sourceInfo.adapterId.LowPart == p.sourceInfo.adapterId.LowPart &&
+                            a.sourceInfo.adapterId.HighPart == p.sourceInfo.adapterId.HighPart &&
+                            a.sourceInfo.id == p.sourceInfo.id);
+        }
+        if (used) continue;
+
+        CcdMode sm{};
+        sm.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE;
+        sm.id = p.sourceInfo.id;
+        sm.adapterId = p.sourceInfo.adapterId;
+        sm.sourceMode.width = want.w;
+        sm.sourceMode.height = want.h;
+        sm.sourceMode.pixelFormat = DISPLAYCONFIG_PIXELFORMAT_32BPP;
+        sm.sourceMode.position = place;
+        modes.push_back(sm);
+
+        CcdPath np = p;
+        np.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+        np.sourceInfo.modeInfoIdx = static_cast<UINT32>(modes.size() - 1);
+        np.targetInfo.modeInfoIdx = kIdxInvalid;
+        if (want.hz) {
+            // The refresh rate can only be chosen through a target mode: setting just
+            // the path's refreshRate is rejected (error 87). One call still.
+            CcdMode tm{};
+            tm.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_TARGET;
+            tm.id = p.targetInfo.id;
+            tm.adapterId = p.targetInfo.adapterId;
+            fillTargetSignal(tm.targetMode, want);
+            modes.push_back(tm);
+            np.targetInfo.modeInfoIdx = static_cast<UINT32>(modes.size() - 1);
+            np.targetInfo.refreshRate = {want.hz, 1};
+        }
+        active.push_back(np);
+
+        const LONG rc = SetDisplayConfig(static_cast<UINT32>(active.size()), active.data(),
+                                         static_cast<UINT32>(modes.size()), modes.data(), kFlags);
+        if (g_ccdVerbose) std::cout << "  SetDisplayConfig (switch on) rc=" << rc << "\n";
+        if (rc != ERROR_SUCCESS) {
+            detail = "SetDisplayConfig (switch on) failed, code " + std::to_string(rc);
+            return ScreenResult::Failed;
+        }
+        return ScreenResult::Switched;
+    }
+    detail = sawVdd ? "the virtual screen has no free display path" : "driver not loaded";
+    return sawVdd ? ScreenResult::Failed : ScreenResult::NoDriver;
+}
+
+// Switches the virtual screen off by clearing ONLY its path's active flag. Safe from
+// any thread and from the Ctrl+C handler. Unless force is set, it does nothing when
+// this process never switched the screen on. Returns true if it switched it off.
+bool virtualScreenOff(const char* reason, bool announce, bool force) {
+    if (!force && !g_screenOwned.load()) return false;
+    std::lock_guard<std::mutex> lock(g_screenMutex);
+    std::vector<CcdPath> paths;
+    std::vector<CcdMode> modes;
+    bool switched = false;
+    if (queryConfig(QDC_ONLY_ACTIVE_PATHS, paths, modes)) {
+        bool found = false;
+        for (CcdPath& p : paths) {
+            if (isVddPath(p)) { p.flags &= ~DISPLAYCONFIG_PATH_ACTIVE; found = true; }
+        }
+        if (found) {
+            const LONG rc = SetDisplayConfig(static_cast<UINT32>(paths.size()), paths.data(),
+                                             static_cast<UINT32>(modes.size()), modes.data(),
+                                             SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG |
+                                                 SDC_ALLOW_CHANGES);
+            switched = rc == ERROR_SUCCESS;
+            if (g_ccdVerbose) std::cout << "  SetDisplayConfig (switch off) rc=" << rc << "\n";
+            if (!switched) std::cerr << "Could not switch the virtual screen off (code " << rc << ").\n";
+        }
+    }
+    g_screenOwned.store(false);
+    if (switched && announce) std::cout << "Virtual screen off (" << reason << ")" << std::endl;
+    return switched;
+}
+
+// Supervisor bookkeeping: called whenever the tablet is seen present or absent while
+// no stream runs. After it has been absent for kTabletGoneMs the screen goes off; it
+// comes back when the loop finds the tablet again (ensureVirtualScreen).
+void tabletPresence(bool present) {
+    static ULONGLONG absentSince = 0;  // supervisor (main) thread only
+    if (present) { absentSince = 0; return; }
+    const ULONGLONG now = GetTickCount64();
+    if (absentSince == 0) { absentSince = now; return; }
+    if (now - absentSince >= kTabletGoneMs && g_screenOwned.load()) {
+        virtualScreenOff("tablet gone for 5 s");
     }
 }
 
-std::optional<DisplayInfo> pickExtendedDisplay(const std::vector<DisplayInfo>& displays,
-                                               int overrideIndex);
+// Prints every attached display's rectangle (physical pixels), for --screen-test.
+void printDisplayRects() {
+    for (const DisplayInfo& d : enumerateDisplays()) {
+        if (!d.attached) continue;
+        std::cout << "  rect " << d.name << " left=" << d.left << " top=" << d.top
+                  << " right=" << d.left + d.width << " bottom=" << d.top + d.height
+                  << (d.isVirtual ? " (virtual)" : "");
+        DEVMODEA dm{};
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsA(d.name.c_str(), ENUM_CURRENT_SETTINGS, &dm)) {
+            std::cout << "  EnumDisplaySettings: " << dm.dmPelsWidth << "x" << dm.dmPelsHeight
+                      << " @" << dm.dmDisplayFrequency << " Hz pos=(" << dm.dmPosition.x << ","
+                      << dm.dmPosition.y << ")";
+        }
+        std::cout << "\n";
+    }
+}
 
 // Turns Windows Advanced Color (HDR) on or off for the display with the given
 // GDI name (e.g. "\\.\DISPLAY5"). HDR must be ON for a 10-bit HDR10 capture, and
 // must be OFF for a normal SDR capture — capturing an HDR framebuffer as SDR
 // looks washed-out/over-bright, so the SDR path explicitly disables it.
-// Uses the CCD API with the SDK's own struct definitions.
-bool setAdvancedColor(const std::string& gdiName, bool enable) {
-    UINT32 numPath = 0, numMode = 0;
-    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &numPath, &numMode) != ERROR_SUCCESS) {
-        return false;
-    }
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(numPath);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(numMode);
-    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &numPath, paths.data(),
-                           &numMode, modes.data(), nullptr) != ERROR_SUCCESS) {
-        return false;
-    }
+// Uses the CCD API with the SDK's own struct definitions. *changed reports whether
+// a switch was actually sent (nothing is sent when the state already matches).
+bool setAdvancedColor(const std::string& gdiName, bool enable, bool* changed = nullptr) {
+    if (changed) *changed = false;
+    std::vector<CcdPath> paths;
+    std::vector<CcdMode> modes;
+    if (!queryConfig(QDC_ONLY_ACTIVE_PATHS, paths, modes)) return false;
 
-    for (UINT32 i = 0; i < numPath; ++i) {
+    for (size_t i = 0; i < paths.size(); ++i) {
         DISPLAYCONFIG_SOURCE_DEVICE_NAME src{};
         src.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
         src.header.size = sizeof(src);
@@ -596,96 +830,98 @@ bool setAdvancedColor(const std::string& gdiName, bool enable) {
         set.header.adapterId = paths[i].targetInfo.adapterId;
         set.header.id = paths[i].targetInfo.id;
         set.enableAdvancedColor = enable ? TRUE : FALSE;
-        return DisplayConfigSetDeviceInfo(&set.header) == ERROR_SUCCESS;
+        const bool ok = DisplayConfigSetDeviceInfo(&set.header) == ERROR_SUCCESS;
+        if (ok && changed) *changed = true;
+        return ok;
     }
     return false;
 }
 
-// Sets the VDD monitor to its native mode and positions it right of the primary.
-void configureVirtualDisplay(const DisplayInfo& display) {
-    DISPLAY_DEVICEA dd{};
-    dd.cb = sizeof(dd);
-    for (DWORD i = 0; EnumDisplayDevicesA(nullptr, i, &dd, 0); ++i) {
-        if (display.name != dd.DeviceName) continue;
-        if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) return;
+// Presets, as in July: Balanced and Best use the tablet's native 2960x1848 at
+// 120 Hz (capturing 60 fps from a 120 Hz screen avoids capture/refresh phase
+// judder). 120 fps at native is past the capture+encode throughput (frames back
+// up, the cursor drags), so Smooth drops to a lighter 16:10 mode and the tablet
+// upscales: 1920x1200 held ffmpeg fps=120 and felt smoother on-device than 2560x1600.
+ScreenMode wantedMode(const Options& options) {
+    if (options.fps >= 120) return {1920, 1200, 120};
+    return {2960, 1848, 120};
+}
 
-        DEVMODEA mode{};
-        mode.dmSize = sizeof(mode);
-        if (!EnumDisplaySettingsA(dd.DeviceName, ENUM_CURRENT_SETTINGS, &mode)) return;
-        mode.dmPosition.x = GetSystemMetrics(SM_CXSCREEN);  // right of primary
-        mode.dmPosition.y = 0;
-        mode.dmFields = DM_POSITION;
-        ChangeDisplaySettingsExA(dd.DeviceName, &mode, nullptr,
-                                 CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
-        ChangeDisplaySettingsExA(nullptr, nullptr, nullptr, 0, nullptr);
-        return;
+// Switches the virtual screen on at the wanted mode and placement, waits until DXGI
+// lists it, sets HDR/SDR on it if its state differs, and publishes its rectangle to
+// the touch bridge. Fills `out` with the display as DXGI now sees it.
+PrepResult prepareVirtualDisplay(const Options& options, DisplayInfo& out) {
+    const ScreenMode want = wantedMode(options);
+    const auto t0 = std::chrono::steady_clock::now();
+
+    std::string detail;
+    ScreenResult res = applyVirtualScreen(want, detail);
+    if (res == ScreenResult::NoDriver) return PrepResult::NoDriver;
+    if (res == ScreenResult::Failed) {
+        std::cerr << "Virtual screen: " << detail << ".\n";
+        return PrepResult::Failed;
     }
-}
+    g_screenOwned.store(true);
 
-// Sets the given display (by GDI name) to a specific mode. Used to drop the VDD to
-// a lighter resolution for 120 Hz, which native 2960x1848 can't sustain through the
-// capture+encode path. Returns true on success.
-bool setDisplayResolution(const std::string& gdiName, int w, int h, int hz) {
-    DEVMODEA mode{};
-    mode.dmSize = sizeof(mode);
-    if (!EnumDisplaySettingsA(gdiName.c_str(), ENUM_CURRENT_SETTINGS, &mode)) return false;
-    mode.dmPelsWidth = static_cast<DWORD>(w);
-    mode.dmPelsHeight = static_cast<DWORD>(h);
-    mode.dmDisplayFrequency = static_cast<DWORD>(hz);
-    mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
-    return ChangeDisplaySettingsExA(gdiName.c_str(), &mode, nullptr,
-                                    CDS_UPDATEREGISTRY, nullptr) == DISP_CHANGE_SUCCESSFUL;
-}
-
-// Extends the desktop onto the VDD monitor (activating it) and returns it.
-// Attaches the virtual display to the desktop directly (right of the primary,
-// native 2960x1848). SDC_TOPOLOGY_EXTEND alone re-applies Windows' saved
-// "extend" layout, which leaves the virtual display out when another external
-// monitor is in that layout (seen on this laptop with an HDMI monitor).
-bool attachVirtualDisplay() {
-    DISPLAY_DEVICEA dd{};
-    dd.cb = sizeof(dd);
-    for (DWORD i = 0; EnumDisplayDevicesA(nullptr, i, &dd, 0); ++i) {
-        if (!isVirtualDisplayDevice(dd.DeviceName)) continue;
-        if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) return true;
-        DEVMODEA mode{};
-        mode.dmSize = sizeof(mode);
-        mode.dmPosition.x = GetSystemMetrics(SM_CXSCREEN);
-        mode.dmPosition.y = 0;
-        mode.dmPelsWidth = 2960;
-        mode.dmPelsHeight = 1848;
-        mode.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
-        const LONG rc = ChangeDisplaySettingsExA(dd.DeviceName, &mode, nullptr,
-                                                 CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
-        ChangeDisplaySettingsExA(nullptr, nullptr, nullptr, 0, nullptr);
-        return rc == DISP_CHANGE_SUCCESSFUL;
+    auto waitForDisplay = [&]() -> std::optional<DisplayInfo> {
+        for (int i = 0; i < 150 && !g_stop.load(); ++i) {  // up to ~3 s
+            if (auto d = pickExtendedDisplay(enumerateDisplays(), -1)) return d;
+            Sleep(20);
+        }
+        return std::nullopt;
+    };
+    std::optional<DisplayInfo> found = waitForDisplay();
+    if (!found) {
+        std::cerr << "Virtual screen: it did not appear on the desktop.\n";
+        return PrepResult::Failed;
     }
-    return false;  // driver missing or disabled
-}
-
-bool tryEnableVirtualDisplay(const std::string& /*exeDir*/) {
-    std::cout << "Activating the virtual display...\n";
-    if (!attachVirtualDisplay()) {
-        const LONG rc = SetDisplayConfig(0, nullptr, 0, nullptr,
-                                         SDC_APPLY | SDC_TOPOLOGY_EXTEND);
-        if (rc != ERROR_SUCCESS) {
-            std::cerr << "Could not extend onto the virtual display (code " << rc << ").\n"
-                         "Is the Virtual Display Driver installed and enabled? "
-                         "(re-run the installer, or start from ExtendedDisplay.exe)\n";
-            return false;
+    // Windows may have picked another mode; correct it once (a second change).
+    if (static_cast<UINT32>(found->width) != want.w || static_cast<UINT32>(found->height) != want.h) {
+        if (applyVirtualScreen(want, detail) == ScreenResult::Switched) {
+            if (auto d = waitForDisplay()) found = d;
         }
     }
-    g_vddExtended.store(true);
-    for (int waited = 0; waited < 10 && !g_stop.load(); ++waited) {
-        Sleep(500);
-        if (auto d = pickExtendedDisplay(enumerateDisplays(), -1)) {
-            configureVirtualDisplay(*d);
-            std::cout << "Virtual display active: " << d->width << "x" << d->height << "\n";
-            return true;
+
+    // HDR/SDR only on this display, and only if its state differs.
+    bool colorChanged = false;
+    if (options.hdr) {
+        if (setAdvancedColor(found->name, true, &colorChanged)) {
+            if (colorChanged) std::cout << "HDR enabled on the virtual display.\n";
+            if (colorChanged) Sleep(1500);  // let the framebuffer switch to 10-bit before capture
+        } else {
+            std::cout << "Could not enable HDR automatically. Turn on "
+                         "Settings > Display > Use HDR for the tablet display, "
+                         "or run without --hdr.\n";
+        }
+    } else if (setAdvancedColor(found->name, false, &colorChanged) && colorChanged) {
+        std::cout << "Virtual display set to SDR (correct desktop colors).\n";
+        Sleep(800);  // let the framebuffer switch back to 8-bit before capture
+    }
+
+    // Verify the placement: it must not overlap any other display.
+    for (const DisplayInfo& d : enumerateDisplays()) {
+        if (!d.attached || d.name == found->name) continue;
+        const RECT a{found->left, found->top, found->left + found->width, found->top + found->height};
+        const RECT b{d.left, d.top, d.left + d.width, d.top + d.height};
+        if (rectsIntersect(a, b)) {
+            std::cerr << "Warning: the virtual screen overlaps " << d.name << ".\n";
         }
     }
-    collapseToInternal();
-    return false;
+
+    out = *found;
+    setTouchDisplay(out);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    std::cout << "Virtual screen on: " << found->width << "x" << found->height << " at ("
+              << found->left << "," << found->top << "), " << ms << " ms" << std::endl;
+    return PrepResult::Ok;
+}
+
+// Called by the supervisor before each stream start: if the screen was switched off
+// (tablet gone) switch it back on and refresh `display`. No-op for --display N.
+bool ensureVirtualScreen(const Options& options, DisplayInfo& display) {
+    if (options.displayOverride >= 0 || virtualScreenActive()) return true;
+    return prepareVirtualDisplay(options, display) == PrepResult::Ok;
 }
 
 // ---------------------------------------------------------------------- adb
@@ -695,15 +931,17 @@ bool adbWaitForDevice(const std::string& adb) {
     while (!g_stop.load()) {
         const CaptureResult r = runCapture(quote(adb) + " get-state");
         if (trim(r.output) == "device") {
+            tabletPresence(true);
             if (announced) std::cout << "Tablet connected.\n";
             return true;
         }
+        tabletPresence(false);  // screen goes off after ~5 s without the tablet
         if (!announced) {
             std::cout << "Waiting for tablet over USB... "
                          "(enable USB debugging; use a data-capable cable)\n";
             announced = true;
         }
-        sleepInterruptible(2000);
+        sleepInterruptible(1000);
     }
     return false;
 }
@@ -763,7 +1001,26 @@ bool adbSetup(const std::string& adb, const std::string& exeDir, int localPort) 
     runCapture(quote(adb) +
                " shell am start -n com.heysnap.extdisplay/.MainActivity");
     std::cout << "Receiver app launched (make sure the tablet screen is on and unlocked).\n";
-    Sleep(1500);
+    // Wait until the app listens on its video port instead of a fixed 1.5 s (an
+    // already-open app is ready at once). Port 5000 = 0x1388; state 0A = LISTEN.
+    char portHex[8];
+    snprintf(portHex, sizeof(portHex), ":%04X", kRemotePort);
+    const ULONGLONG deadline = GetTickCount64() + 1500;
+    while (GetTickCount64() < deadline && !g_stop.load()) {
+        const std::string net =
+            runCapture(quote(adb) + " shell cat /proc/net/tcp6 /proc/net/tcp").output;
+        bool listening = false;
+        for (size_t p = net.find(portHex); p != std::string::npos; p = net.find(portHex, p + 1)) {
+            // "local_address rem_address st": the local port is followed by the
+            // remote address, then the state.
+            const size_t sp = net.find(' ', p);
+            if (sp == std::string::npos) break;
+            const size_t st = net.find(' ', sp + 1);
+            if (st != std::string::npos && net.compare(st + 1, 2, "0A") == 0) { listening = true; break; }
+        }
+        if (listening) break;
+        Sleep(100);
+    }
     return true;
 }
 
@@ -828,18 +1085,27 @@ std::vector<Attempt> buildLadder(const std::string& ffmpeg, const Options& optio
         {"x264",  options.hevc ? "libx265"    : "libx264"},
     };
 
-    std::vector<Attempt> ladder;
+    // Probe every candidate at once (each probe is a short ffmpeg run); one after
+    // another they added seconds to every Start. The ladder order is unchanged.
+    std::vector<const Candidate*> wanted;
     for (const Candidate& c : all) {
         if (c.encoder[0] == '\0') continue;  // codec not available via this backend
-        if (!options.encoderOverride.empty() && options.encoderOverride != c.flag) {
-            continue;
-        }
-        std::cout << "Probing " << c.encoder << "... ";
-        if (!probeEncoder(ffmpeg, c.encoder)) {
-            std::cout << "not available\n";
-            continue;
-        }
-        std::cout << "ok\n";
+        if (!options.encoderOverride.empty() && options.encoderOverride != c.flag) continue;
+        wanted.push_back(&c);
+    }
+    std::vector<std::future<bool>> probes;
+    for (const Candidate* c : wanted) {
+        const std::string enc = c->encoder;
+        probes.push_back(std::async(std::launch::async,
+                                    [&ffmpeg, enc]() { return probeEncoder(ffmpeg, enc); }));
+    }
+
+    std::vector<Attempt> ladder;
+    for (size_t i = 0; i < wanted.size(); ++i) {
+        const Candidate& c = *wanted[i];
+        const bool available = probes[i].get();
+        std::cout << "Probing " << c.encoder << "... " << (available ? "ok" : "not available") << "\n";
+        if (!available) continue;
         ladder.push_back({c.encoder, false});  // plain CPU-fed path first (always works)
         // The NVENC GPU zero-copy path is lower-latency but only works when the
         // display is on the NVIDIA adapter (never the VDD), so try it AFTER plain.
@@ -1205,7 +1471,13 @@ private:
         ti.type = PT_PEN;
         POINTER_PEN_INFO& penInfo = ti.penInfo;
         penInfo.pointerInfo.pointerType = PT_PEN;
-        penInfo.pointerInfo.ptPixelLocation = pt;
+        // InjectSyntheticPointerInput takes pen positions relative to the VIRTUAL
+        // SCREEN's top-left, not the primary's (unlike InjectTouchInput). Measured
+        // with a monitor left of the primary (virtual screen at x=-1920): every pen
+        // point landed exactly 1920 px left; with this shift, 0 px error on all
+        // three displays.
+        penInfo.pointerInfo.ptPixelLocation.x = pt.x - GetSystemMetrics(SM_XVIRTUALSCREEN);
+        penInfo.pointerInfo.ptPixelLocation.y = pt.y - GetSystemMetrics(SM_YVIRTUALSCREEN);
         if (pkt.tool == 2) {
             penInfo.penFlags |= PEN_FLAG_INVERTED | PEN_FLAG_ERASER;
         }
@@ -1272,7 +1544,7 @@ bool sendAll(SOCKET sock, const unsigned char* buffer, int length) {
 }
 
 void runTouchBridge(const std::string adb, const std::string host, int localPort,
-                    bool adbMode, const DisplayInfo display) {
+                    bool adbMode) {
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
 
@@ -1336,7 +1608,7 @@ void runTouchBridge(const std::string adb, const std::string host, int localPort
                 if (haveCtr && ctr <= lastCtr) continue;  // drop replays / reorders
                 lastCtr = ctr; haveCtr = true;
                 if (readBe16(pt.data() + 4) != kTouchProtocolVersion) continue;
-                injector.handle(parseTouchPacket(pt.data()), display);
+                injector.handle(parseTouchPacket(pt.data()), getTouchDisplay());
             }
         } else {
             unsigned char packet[kTouchPacketSize];
@@ -1353,7 +1625,7 @@ void runTouchBridge(const std::string adb, const std::string host, int localPort
                 }
                 if (!connected) break;
                 if (readBe16(packet + 4) != kTouchProtocolVersion) continue;  // drop
-                injector.handle(parseTouchPacket(packet), display);
+                injector.handle(parseTouchPacket(packet), getTouchDisplay());
             }
         }
         closesocket(sock);
@@ -1437,8 +1709,10 @@ std::string muteMarkerPath() {
 }
 
 // Mute/unmute the default render endpoint (the PC's speakers). COM must already be
-// initialized on the calling thread. WASAPI loopback still captures the full mix
-// while muted (verified), so the tablet keeps getting audio.
+// initialized on the calling thread. NOTE: on some PCs (measured: ASUS, Realtek HD
+// Audio + DTS APOs, Windows 11 26320) a normal device loopback goes silent when the
+// endpoint is muted or at volume 0, so the audio bridge captures with *process
+// loopback* when it mutes (see openProcessLoopbackExcluding), which is unaffected.
 bool setEndpointMute(bool mute) {
     IMMDeviceEnumerator* en = nullptr;
     IMMDevice* dev = nullptr;
@@ -1466,6 +1740,105 @@ void restoreLocalMuteIfNeeded() {
     DeleteFileA(muteMarkerPath().c_str());
 }
 
+// Process loopback (Windows 10 version 2004+, build 19041): captures the audio of every
+// process EXCEPT the given process tree, tapped inside the audio engine before the
+// endpoint's volume/mute/driver stage. Muting the PC speakers therefore does not
+// silence what is sent to the tablet, unlike plain device loopback (measured here:
+// device loopback peak 0.119 -> 0.000 on mute; process loopback stays at 0.300).
+struct ActivateHandler : IActivateAudioInterfaceCompletionHandler, IAgileObject {
+    LONG refs = 1;
+    HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    ~ActivateHandler() { if (done) CloseHandle(done); }
+    STDMETHODIMP QueryInterface(REFIID r, void** o) override {
+        if (r == __uuidof(IUnknown) || r == __uuidof(IActivateAudioInterfaceCompletionHandler))
+            *o = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
+        else if (r == __uuidof(IAgileObject)) *o = static_cast<IAgileObject*>(this);
+        else { *o = nullptr; return E_NOINTERFACE; }
+        AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refs); }
+    STDMETHODIMP_(ULONG) Release() override {
+        const ULONG n = InterlockedDecrement(&refs);
+        if (n == 0) delete this;
+        return n;
+    }
+    STDMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation*) override {
+        SetEvent(done);
+        return S_OK;
+    }
+};
+
+// On success: *outClient is initialised (loopback, 48 kHz / 16-bit / stereo, not yet
+// started) with *outCapture, a CoTaskMem-allocated *outFmt and an event handle the
+// caller closes. Returns false on any failure (older Windows, API missing) and leaves
+// the outputs untouched.
+bool openProcessLoopbackExcluding(DWORD excludePid, IAudioClient** outClient,
+                                  IAudioCaptureClient** outCapture, WAVEFORMATEX** outFmt,
+                                  HANDLE* outEvent) {
+    AUDIOCLIENT_ACTIVATION_PARAMS ap = {};
+    ap.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+    ap.ProcessLoopbackParams.TargetProcessId = excludePid;
+    ap.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
+    PROPVARIANT pv = {};
+    pv.vt = VT_BLOB;
+    pv.blob.cbSize = sizeof(ap);
+    pv.blob.pBlobData = reinterpret_cast<BYTE*>(&ap);
+
+    ActivateHandler* h = new ActivateHandler;
+    IActivateAudioInterfaceAsyncOperation* op = nullptr;
+    if (FAILED(ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+                                           __uuidof(IAudioClient), &pv, h, &op)) || !op) {
+        h->Release();
+        return false;
+    }
+    WaitForSingleObject(h->done, 5000);
+    HRESULT ahr = E_FAIL;
+    IUnknown* unk = nullptr;
+    op->GetActivateResult(&ahr, &unk);
+    op->Release();
+    h->Release();
+    if (FAILED(ahr) || !unk) return false;
+
+    IAudioClient* c = nullptr;
+    unk->QueryInterface(__uuidof(IAudioClient), reinterpret_cast<void**>(&c));
+    unk->Release();
+    if (!c) return false;
+
+    WAVEFORMATEX* f = static_cast<WAVEFORMATEX*>(CoTaskMemAlloc(sizeof(WAVEFORMATEX)));
+    if (!f) { c->Release(); return false; }
+    *f = {};
+    f->wFormatTag = WAVE_FORMAT_PCM;
+    f->nChannels = 2;
+    f->nSamplesPerSec = 48000;
+    f->wBitsPerSample = 16;
+    f->nBlockAlign = 4;
+    f->nAvgBytesPerSec = 48000 * 4;
+    // Measured on this PC: AUDCLNT_STREAMFLAGS_NOPERSIST is rejected (0x88890021),
+    // while LOOPBACK|EVENTCALLBACK with 16-bit PCM works. The event is not waited on
+    // (the bridge polls), it only has to exist.
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    IAudioCaptureClient* cap = nullptr;
+    if (!ev ||
+        FAILED(c->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                             AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                             // 200 ms: with 0 the buffer is one ~10 ms period, which a
+                             // 5 ms Sleep (really up to ~15 ms) overran: choppy audio.
+                             2000000, 0, f, nullptr)) ||
+        FAILED(c->SetEventHandle(ev)) ||
+        FAILED(c->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(&cap)))) {
+        if (ev) CloseHandle(ev);
+        CoTaskMemFree(f);
+        c->Release();
+        return false;
+    }
+    *outClient = c;
+    *outCapture = cap;
+    *outFmt = f;
+    *outEvent = ev;
+    return true;
+}
+
 void runAudioBridge(const std::string adb, const std::string host, int localPort,
                     bool adbMode, bool muteLocal, int audioDelayMs) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
@@ -1475,7 +1848,9 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
     IAudioClient* client = nullptr;
     IAudioCaptureClient* capture = nullptr;
     WAVEFORMATEX* mixFmt = nullptr;
+    HANDLE procEvent = nullptr;  // only when capturing via process loopback
     auto cleanup = [&]() {
+        if (procEvent) { CloseHandle(procEvent); procEvent = nullptr; }
         if (capture) capture->Release();
         if (client) client->Release();
         if (dev) dev->Release();
@@ -1501,6 +1876,26 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
         std::cerr << "Desktop audio: WASAPI loopback unavailable; continuing without audio.\n";
         cleanup(); CoUninitialize(); return;
     }
+    // "Mute PC speakers": plain device loopback can go silent together with the speakers
+    // (driver-dependent), so capture with process loopback (everything except this
+    // process tree) instead. If that is unavailable (Windows older than 10 2004) the
+    // option can't work: leave the speakers on and say so.
+    if (muteLocal) {
+        IAudioClient* pc = nullptr;
+        IAudioCaptureClient* pcap = nullptr;
+        WAVEFORMATEX* pfmt = nullptr;
+        HANDLE pev = nullptr;
+        if (openProcessLoopbackExcluding(GetCurrentProcessId(), &pc, &pcap, &pfmt, &pev)) {
+            capture->Release();
+            client->Release();
+            CoTaskMemFree(mixFmt);
+            client = pc; capture = pcap; mixFmt = pfmt; procEvent = pev;
+        } else {
+            muteLocal = false;
+            std::cout << "Desktop audio: \"Mute PC speakers\" needs Windows 10 version 2004 or newer; "
+                         "the PC speakers stay on." << std::endl;
+        }
+    }
     const uint32_t sampleRate = mixFmt->nSamplesPerSec;
     std::cout << "Desktop audio: capturing at " << sampleRate
               << " Hz -> tablet (stereo 16-bit).\n";
@@ -1509,34 +1904,46 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { cleanup(); CoUninitialize(); return; }
 
     // Optionally silence the PC's own speakers so sound only comes from the tablet.
-    // On some PCs muting the speakers ALSO silences the loopback capture (measured
-    // on an ASUS laptop with Realtek audio, Windows 11 build 26320: peak 0.35
-    // unmuted, exactly 0 muted, and the same at volume 0), which would stream pure
-    // silence to the tablet. So the mute is applied only once sound is playing and
-    // then checked: if the capture goes silent right after muting, the speakers are
-    // un-muted again and the option is dropped for this session.
-    // A marker file lets the next launch un-mute if we're killed. Pressing Volume
-    // Up/Down un-mutes the endpoint (Windows behaviour), so a working mute is
-    // re-asserted periodically below.
+    // The capture above is process loopback, which is tapped before the endpoint's
+    // mute, so muting is safe. We mute only while a tablet is connected, only if the
+    // speakers were not already muted by the user (then we never touch them), and
+    // write a marker file first so a force-killed sender is healed at the next start
+    // (restoreLocalMuteIfNeeded). Pressing Volume Up/Down un-mutes the endpoint
+    // (Windows behaviour), so a mute we own is re-asserted periodically below.
+    // While a tablet is receiving we HOLD the mute (re-asserted below), whether or
+    // not the user had muted already: measured, a user who started muted and then
+    // un-muted got sound from the laptop. On release the speakers go back to exactly
+    // what the user had. The marker file is written only when we changed an
+    // un-muted endpoint, so the force-kill self-heal never un-mutes a user's mute.
     IAudioEndpointVolume* epv = nullptr;
-    bool didMute = false;     // speakers currently muted by us
-    bool muteGivenUp = false; // muting silences the capture on this PC
-    bool muteConfirmed = false;
-    ULONGLONG mutedAt = 0;
-    bool soundAfterMute = false;
+    bool didMute = false;        // we are holding the speakers muted
+    BOOL userHadMuted = FALSE;   // their state before we took over
     if (muteLocal &&
         FAILED(dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
                              reinterpret_cast<void**>(&epv)))) {
         epv = nullptr;
     }
-    if (muteLocal && epv) {
-        std::cout << "Desktop audio: PC speakers will be muted once sound plays.\n";
-    }
+    auto muteLocalSpeakers = [&]() {
+        if (!epv || didMute) return;
+        if (FAILED(epv->GetMute(&userHadMuted))) return;
+        if (!userHadMuted) {
+            FILE* mf = nullptr;
+            if (fopen_s(&mf, muteMarkerPath().c_str(), "w") == 0 && mf) fclose(mf);
+            if (FAILED(epv->SetMute(TRUE, nullptr))) {
+                DeleteFileA(muteMarkerPath().c_str());
+                return;
+            }
+        }
+        didMute = true;
+        std::cout << "Desktop audio: PC speakers muted (sound plays on the tablet only)." << std::endl;
+    };
     auto unmuteLocal = [&]() {
         if (!didMute) return;
-        epv->SetMute(FALSE, nullptr);
+        epv->SetMute(userHadMuted, nullptr);  // back to what the user had
         DeleteFileA(muteMarkerPath().c_str());
         didMute = false;
+        std::cout << (userHadMuted ? "Desktop audio: PC speakers left muted, as they were."
+                                   : "Desktop audio: PC speakers un-muted.") << std::endl;
     };
     ULONGLONG lastRemute = GetTickCount64();
 
@@ -1607,25 +2014,15 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
             }
         }
 
-        client->Reset();  // drop anything buffered from a prior session
+        // Drop anything buffered from a prior session. Never Reset() a process-loopback
+        // client: measured, it then delivers no packets at all (tablet silent).
+        if (!procEvent) client->Reset();
         client->Start();
+        muteLocalSpeakers();  // a tablet is receiving: now it's safe to silence the PC
         bool alive = true;
         while (!g_stop.load() && alive) {
-            // Mute check: 200-800 ms after muting, the capture must still carry
-            // sound (the first 200 ms can be audio buffered before the mute).
-            if (didMute && !muteConfirmed && GetTickCount64() - mutedAt > 800) {
-                if (soundAfterMute) {
-                    muteConfirmed = true;
-                    std::cout << "Desktop audio: PC speakers muted (sound plays on the tablet only)." << std::endl;
-                } else {
-                    unmuteLocal();
-                    muteGivenUp = true;
-                    std::cout << "Desktop audio: muting this PC's speakers also silences the sound "
-                                 "sent to the tablet (audio driver), so the PC speakers stay on." << std::endl;
-                }
-            }
             // Re-assert the mute if the user's volume keys un-muted the endpoint.
-            if (didMute && muteConfirmed) {
+            if (didMute) {
                 const ULONGLONG now = GetTickCount64();
                 if (now - lastRemute > 500) {
                     lastRemute = now;
@@ -1635,7 +2032,14 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
             }
             UINT32 packetLen = 0;
             if (FAILED(capture->GetNextPacketSize(&packetLen))) break;
-            if (packetLen == 0) { sleepInterruptible(5); continue; }
+            if (packetLen == 0) {
+                // Process loopback signals its event per period: wait on it instead
+                // of sleeping, so no period is missed.
+                // (sleepInterruptible() sleeps in 100 ms steps: far too coarse here.)
+                if (procEvent) WaitForSingleObject(procEvent, 50);
+                else Sleep(5);
+                continue;
+            }
             while (packetLen != 0 && alive) {
                 BYTE* data = nullptr;
                 UINT32 frames = 0;
@@ -1646,22 +2050,6 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
                 mixToStereoS16(data, frames, mixFmt,
                                (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0, pcm);
                 capture->ReleaseBuffer(frames);
-
-                if (epv && !muteGivenUp) {
-                    int peak = 0;
-                    for (int16_t v : pcm) { const int a = v < 0 ? -v : v; if (a > peak) peak = a; }
-                    const ULONGLONG now = GetTickCount64();
-                    if (!didMute && !muteConfirmed && peak > 300 &&  // ~1% full scale: real sound
-                        SUCCEEDED(epv->SetMute(TRUE, nullptr))) {
-                        didMute = true;
-                        mutedAt = now;
-                        soundAfterMute = false;
-                        FILE* mf = nullptr;
-                        if (fopen_s(&mf, muteMarkerPath().c_str(), "w") == 0 && mf) fclose(mf);
-                    } else if (didMute && !muteConfirmed && now - mutedAt > 200 && peak > 0) {
-                        soundAfterMute = true;
-                    }
-                }
 
                 const unsigned char* payload = reinterpret_cast<const unsigned char*>(pcm.data());
                 int payloadLen = static_cast<int>(pcm.size() * sizeof(int16_t));
@@ -1690,12 +2078,10 @@ void runAudioBridge(const std::string adb, const std::string host, int localPort
         }
         client->Stop();
         closesocket(sock);
+        unmuteLocal();  // tablet gone: give the PC its sound back until it reconnects
         if (!g_stop.load()) sleepInterruptible(1000);
     }
-    if (didMute) {
-        unmuteLocal();
-        std::cout << "Desktop audio: PC speakers un-muted.\n";
-    }
+    unmuteLocal();
     if (epv) epv->Release();
     cleanup();
     WSACleanup();
@@ -1799,7 +2185,8 @@ void printUsage() {
     std::cout <<
         "ExtendedDisplaySender — plug-and-play extended display over USB\n\n"
         "Just run it with no arguments:\n"
-        "  - finds the extended display (enables the virtual display driver if needed)\n"
+        "  - switches the virtual screen on once a tablet is found (the driver must be\n"
+        "    loaded: start from the Extended Display app) and off again when done\n"
         "  - waits for the tablet over USB, installs and launches the receiver app\n"
         "  - picks the best encoder for this machine and streams; reconnects automatically\n\n"
         "Options:\n"
@@ -1808,6 +2195,7 @@ void printUsage() {
         "  --bitrate KBPS    Encoder bitrate in kbps (default 25000)\n"
         "  --display N       Capture a specific display (see --list-displays)\n"
         "  --list-displays   Print the display table and exit\n"
+        "  --cleanup         Switch the virtual screen off, un-mute the PC, and exit\n"
         "  --width N         Scale output width (default: native)\n"
         "  --height N        Scale output height (default: native)\n"
         "  --encoder NAME    Pin encoder: nvenc | qsv | amf | mf | x264\n"
@@ -1856,6 +2244,12 @@ Options parseArgs(int argc, char** argv) {
             options.displayOverride = readInt(requireValue("--display"), "--display");
         } else if (arg == "--list-displays") {
             options.listDisplays = true;
+        } else if (arg == "--cleanup") {
+            options.cleanup = true;
+        } else if (arg == "--audio-test") {
+            options.audioTest = true;
+        } else if (arg == "--screen-test") {
+            options.screenTest = true;
         } else if (arg == "--width") {
             options.width = readInt(requireValue("--width"), "--width");
         } else if (arg == "--height") {
@@ -2249,7 +2643,7 @@ bool tabletReachable(const std::string& host, int port, int timeoutMs) {
 
 int runSupervised(const Options& options, const std::string& ffmpeg,
                   const std::string& adb, const std::string& exeDir,
-                  const DisplayInfo& display) {
+                  DisplayInfo display) {
     const bool adbMode = options.host.empty();
     const std::string host = adbMode ? "127.0.0.1" : options.host;
 
@@ -2300,6 +2694,23 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
             continue;
         }
 
+        // The tablet is back (or never left): make sure the virtual screen is on.
+        // With Wi-Fi the tablet is probed first, but only while the screen is off,
+        // so a running link is never disturbed.
+        if (!adbMode && options.displayOverride < 0 && !virtualScreenActive()) {
+            if (!tabletReachable(host, options.port, 1000)) {
+                tabletPresence(false);
+                sleepInterruptible(1000);
+                continue;
+            }
+            tabletPresence(true);
+        }
+        if (!ensureVirtualScreen(options, display)) {
+            if (g_stop.load()) break;
+            sleepInterruptible(1500);
+            continue;
+        }
+
         const std::string cmd = buildStreamCommand(ffmpeg, options, display, attempt, host);
         const bool encTcp = !options.udp && g_pairKey.has_value();
         std::cout << "\nStreaming " << display.name
@@ -2341,7 +2752,7 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
                 return 5;
             }
             g_child.store(pi.hProcess);
-    killWithSender(pi.hProcess);
+            killWithSender(pi.hProcess);
             const ULONGLONG started = GetTickCount64();
             WaitForSingleObject(pi.hProcess, INFINITE);
             uptime = GetTickCount64() - started;
@@ -2365,7 +2776,9 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
 
         if (uptime >= kProvenUptimeMs) {
             fastFails = 0;
+            tabletPresence(true);  // it was streaming a moment ago
             std::cout << "Stream ended (tablet unplugged or app closed). Reconnecting...\n";
+            if (!adbMode) tabletPresence(false);  // Wi-Fi: start the 5 s clock
             continue;
         }
 
@@ -2375,11 +2788,13 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
         // ladder and giving up. (USB also re-waits via adbSetup at the top.)
         if (!tabletReachable(host, options.port, 1000)) {
             std::cout << "Tablet not reachable; waiting to reconnect...\n";
+            tabletPresence(false);
             fastFails = 0;
             sleepInterruptible(1500);
             continue;
         }
 
+        tabletPresence(true);  // reachable: an encoder problem, not a missing tablet
         ++fastFails;
         if (!proven && fastFails >= 2) {
             std::cout << attempt.encoder << (attempt.zeroCopy ? " zero-copy" : "")
@@ -2396,6 +2811,165 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
         sleepInterruptible(1500);
     }
     return 0;
+}
+
+// Dev-only (--audio-test): opens the same process loopback the audio bridge uses
+// (everything except this process tree), keeps the speakers muted for 3 s and
+// prints the capture peak, then puts the speakers back exactly as they were. It
+// plays no sound itself, so a non-zero peak needs something playing on the PC.
+// The mute is applied only if the user had not already muted; the prior mute state
+// and master volume are restored and verified.
+int runAudioTest() {
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return 1;
+    IMMDeviceEnumerator* en = nullptr;
+    IMMDevice* dev = nullptr;
+    IAudioEndpointVolume* epv = nullptr;
+    int rc = 1;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                   __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&en))) &&
+        SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &dev)) &&
+        SUCCEEDED(dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void**>(&epv)))) {
+        BOOL priorMute = FALSE;
+        float priorVol = 0.0f;
+        epv->GetMute(&priorMute);
+        epv->GetMasterVolumeLevelScalar(&priorVol);
+        std::cout << "audio-test: before: muted=" << priorMute << " volume=" << priorVol << "\n";
+
+        IAudioClient* client = nullptr;
+        IAudioCaptureClient* capture = nullptr;
+        WAVEFORMATEX* fmt = nullptr;
+        HANDLE ev2 = nullptr;
+        if (!openProcessLoopbackExcluding(GetCurrentProcessId(), &client, &capture, &fmt, &ev2)) {
+            std::cout << "audio-test: process loopback unavailable on this PC\n";
+        } else {
+            bool weMuted = false;
+            if (!priorMute && SUCCEEDED(epv->SetMute(TRUE, nullptr))) weMuted = true;
+            client->Start();
+            std::vector<int16_t> pcm;
+            float peak = 0.0f;
+            UINT64 frames = 0, packets = 0, silentPackets = 0;
+            const ULONGLONG end = GetTickCount64() + 3000;
+            while (GetTickCount64() < end) {
+                UINT32 n = 0;
+                while (SUCCEEDED(capture->GetNextPacketSize(&n)) && n > 0) {
+                    BYTE* data = nullptr;
+                    UINT32 got = 0;
+                    DWORD flags = 0;
+                    if (FAILED(capture->GetBuffer(&data, &got, &flags, nullptr, nullptr))) break;
+                    mixToStereoS16(data, got, fmt, (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0, pcm);
+                    capture->ReleaseBuffer(got);
+                    for (int16_t v : pcm) {
+                        const float a = (v < 0 ? -static_cast<float>(v) : static_cast<float>(v)) / 32768.0f;
+                        if (a > peak) peak = a;
+                    }
+                    frames += got;
+                    ++packets;
+                    if (flags & AUDCLNT_BUFFERFLAGS_SILENT) ++silentPackets;
+                }
+                WaitForSingleObject(ev2, 50);  // same wait as the bridge
+            }
+            client->Stop();
+            BOOL nowMuted = FALSE;
+            epv->GetMute(&nowMuted);
+            std::cout << "audio-test: process loopback ok, endpoint muted during capture="
+                      << nowMuted << " packets=" << packets << " (silent " << silentPackets
+                      << ") frames=" << frames << " peak=" << peak << "\n";
+            if (weMuted) epv->SetMute(FALSE, nullptr);
+            BOOL afterMute = FALSE;
+            float afterVol = 0.0f;
+            epv->GetMute(&afterMute);
+            epv->GetMasterVolumeLevelScalar(&afterVol);
+            std::cout << "audio-test: after: muted=" << afterMute << " volume=" << afterVol
+                      << (afterMute == priorMute && afterVol == priorVol ? " (restored)" : " (DIFFERS)")
+                      << "\n";
+            if (ev2) CloseHandle(ev2);
+            capture->Release();
+            client->Release();
+            CoTaskMemFree(fmt);
+            rc = 0;
+        }
+    } else {
+        std::cout << "audio-test: no default render endpoint\n";
+    }
+    if (epv) epv->Release();
+    if (dev) dev->Release();
+    if (en) en->Release();
+    CoUninitialize();
+    return rc;
+}
+
+// Graceful stop for the launcher: a manual-reset named event that the launcher
+// signals instead of killing the process. It behaves like Ctrl+C (stop ffmpeg,
+// switch the virtual screen off, un-mute) and the process exits 0 within about 2 s
+// even when the main thread is stuck in a long blocking call (adb install, UDP
+// discovery, encoder probes).
+void stopEventWatcher(HANDLE stopEvent) {
+    WaitForSingleObject(stopEvent, INFINITE);
+    requestStop("stop requested by the launcher");
+    Sleep(1600);  // main normally returns well before this
+    restoreLocalMuteIfNeeded();
+    ExitProcess(0);
+}
+
+void startStopEventWatcher() {
+    const std::string name = "Local\\ExtendedDisplaySender-Stop-" +
+                             std::to_string(GetCurrentProcessId());
+    HANDLE ev = CreateEventA(nullptr, TRUE, FALSE, name.c_str());
+    if (ev) std::thread(stopEventWatcher, ev).detach();
+}
+
+// Common exit path: screen off, then make sure the PC speakers are un-muted. The
+// audio thread un-mutes by itself once g_stop is set; give it a moment, then use
+// the marker file as the backstop (the process ends when main returns, which would
+// otherwise cut the audio thread short).
+int finishAndExit(int code, const char* reason) {
+    virtualScreenOff(reason);
+    for (int i = 0; i < 14 && fileExists(muteMarkerPath()); ++i) Sleep(50);
+    restoreLocalMuteIfNeeded();
+    return code;
+}
+
+// Dev-only: screen on, list, wait, screen off, list. Prints rectangles and timings.
+int runScreenTest(const Options& options) {
+    g_ccdVerbose = true;
+    auto show = [](const char* title) {
+        std::cout << title << "\n";
+        printDisplays(enumerateDisplays());
+        printDisplayRects();
+    };
+    show("--- before");
+    DisplayInfo d;
+    const auto t0 = std::chrono::steady_clock::now();
+    const PrepResult r = prepareVirtualDisplay(options, d);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    std::cout << "prepareVirtualDisplay result=" << static_cast<int>(r) << " total " << ms << " ms\n";
+    if (r == PrepResult::Ok) {
+        show("--- on");
+        // Already-on logic: the same mode must send nothing; another mode re-modes.
+        std::string detail;
+        const ScreenMode same = wantedMode(options);
+        const ScreenResult r1 = applyVirtualScreen(same, detail);
+        std::cout << "re-apply same mode -> " << (r1 == ScreenResult::Unchanged ? "Unchanged" : "CHANGED/FAILED") << "\n";
+        const ScreenMode other = same.w == 1920 ? ScreenMode{2960, 1848, 60} : ScreenMode{1920, 1200, 120};
+        const auto t2 = std::chrono::steady_clock::now();
+        const ScreenResult r2 = applyVirtualScreen(other, detail);
+        const auto ms3 = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t2).count();
+        std::cout << "re-mode to " << other.w << "x" << other.h << "@" << other.hz << " -> "
+                  << (r2 == ScreenResult::Switched ? "Switched" : "FAILED " + detail) << " in " << ms3 << " ms\n";
+        Sleep(500);
+        show("--- re-moded");
+        Sleep(1500);
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    const bool off = virtualScreenOff("screen test finished", true, true);
+    const auto ms2 = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t1).count();
+    std::cout << "off switched=" << off << " in " << ms2 << " ms\n";
+    show("--- after");
+    return r == PrepResult::Ok ? 0 : 2;
 }
 
 }  // namespace
@@ -2423,8 +2997,26 @@ int main(int argc, char** argv) {
     std::cout << std::unitbuf;
     try {
         Options options = parseArgs(argc, argv);  // host may be filled by --wifi discovery
+
+        // Launcher hook: release everything a killed sender could have left behind.
+        if (options.cleanup) {
+            const bool wasMuted = fileExists(muteMarkerPath());
+            const bool wasOn = virtualScreenOff("cleanup", false, true);
+            restoreLocalMuteIfNeeded();
+            std::cout << "Cleanup: virtual screen " << (wasOn ? "switched off" : "already off")
+                      << ", PC speakers " << (wasMuted ? "un-muted" : "left as they were") << ".\n";
+            return 0;
+        }
+        if (options.listDisplays) {
+            printDisplays(enumerateDisplays());
+            return 0;
+        }
+        if (options.audioTest) return runAudioTest();
+        if (options.screenTest) return runScreenTest(options);
+
         SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
         SetUnhandledExceptionFilter(crashHandler);
+        startStopEventWatcher();
 
         // Pairing: if the GUI (or the user) set a pairing code in EXTDISPLAY_KEY,
         // derive the shared key and encrypt the channels. Passed via env, not the
@@ -2447,11 +3039,6 @@ int main(int argc, char** argv) {
         restoreLocalMuteIfNeeded();
 
         const std::string exeDir = exeDirectory();
-
-        if (options.listDisplays) {
-            printDisplays(enumerateDisplays());
-            return 0;
-        }
 
         // Tools.
         std::string ffmpeg = exeDir + "\\ffmpeg.exe";
@@ -2480,7 +3067,7 @@ int main(int argc, char** argv) {
                 std::cout << "No tablet found yet; retrying. (Same Wi-Fi network? "
                              "App open?)\n";
             }
-            if (g_stop.load()) return 0;
+            if (g_stop.load()) return finishAndExit(0, "stopped");
         }
 
         // Auto mode (no --wifi, no --host): prefer USB if a tablet is on adb,
@@ -2504,82 +3091,59 @@ int main(int argc, char** argv) {
                     announced = true;
                 }
             }
-            if (g_stop.load()) return 0;
+            if (g_stop.load()) return finishAndExit(0, "stopped");
         }
 
-        // Display.
-        auto displays = enumerateDisplays();
-        auto selected = pickExtendedDisplay(displays, options.displayOverride);
-        if (!selected && options.displayOverride < 0) {
-            if (tryEnableVirtualDisplay(exeDir)) {
-                displays = enumerateDisplays();
-                selected = pickExtendedDisplay(displays, -1);
+        // Display. A tablet exists now, so this is the moment the virtual screen is
+        // switched on (only its own display path; real monitors are never touched).
+        // --display N captures a real display as it is and never switches anything.
+        DisplayInfo selected;
+        if (options.displayOverride >= 0) {
+            const auto displays = enumerateDisplays();
+            const auto picked = pickExtendedDisplay(displays, options.displayOverride);
+            if (!picked) {
+                std::cerr << "Display " << options.displayOverride << " is not available.\n"
+                             "Displays found:\n";
+                printDisplays(displays);
+                return 2;
             }
-        }
-        if (!selected) {
-            std::cerr << "No extended display available.\n"
-                         "Re-run the installer with the virtual display driver option, "
-                         "start from ExtendedDisplay.exe (it enables the driver), or pick "
-                         "a display yourself with --display N. See docs/extended-display.md."
-                         "\nDisplays found:\n";
-            printDisplays(displays);
-            return 2;
-        }
-
-        std::cout << "Extended display: " << selected->name << " "
-                  << selected->width << "x" << selected->height
-                  << " (adapter " << selected->adapterIndex
-                  << ", output " << selected->outputIndex << ")\n";
-
-        // 120 Hz at native 2960x1848 is past the capture+encode throughput (frames
-        // back up, the cursor drags). Drop the VDD to a lighter 16:10 mode; the
-        // tablet upscales to its panel. 1920x1200 chosen over 2560x1600: both held
-        // ffmpeg fps=120 (0.989x / 0.997x), but 2560 was perceptibly less smooth
-        // on-device — the encoder stat can't see decode/render headroom. For
-        // <120 fps restore native (a prior 120 fps run persists the lowered mode
-        // in the registry, so a later 60 fps run would otherwise stay lowered).
-        // Mode and colour changes below apply only to the virtual display; a real
-        // monitor chosen with --display keeps its own mode (only an explicit --hdr
-        // touches it).
-        if (!selected->isVirtual) {
+            selected = *picked;
             std::cout << "Display is not the virtual display; leaving its resolution as is.\n";
-        } else if (options.fps >= 120 && selected->width > 1920) {
-            if (setDisplayResolution(selected->name, 1920, 1200, options.fps)) {
-                Sleep(1000);
-                selected->width = 1920;
-                selected->height = 1200;
-                std::cout << "120 fps: virtual display set to 1920x1200 for smooth 120 Hz.\n";
+            if (options.hdr) {
+                bool changed = false;
+                if (setAdvancedColor(selected.name, true, &changed)) {
+                    std::cout << "HDR enabled on the display.\n";
+                    if (changed) Sleep(1500);
+                } else {
+                    std::cout << "Could not enable HDR automatically. Turn on "
+                                 "Settings > Display > Use HDR for the tablet display, "
+                                 "or run without --hdr.\n";
+                }
             }
-        } else if (options.fps < 120 && selected->width < 2960) {
-            if (setDisplayResolution(selected->name, 2960, 1848, 120)) {
-                Sleep(1000);
-                selected->width = 2960;
-                selected->height = 1848;
-                std::cout << "Restored virtual display to native 2960x1848.\n";
+            setTouchDisplay(selected);
+        } else {
+            const PrepResult prep = prepareVirtualDisplay(options, selected);
+            if (prep == PrepResult::NoDriver) {
+                std::cerr << "The virtual display driver is not loaded. Start from the "
+                             "Extended Display app, which loads the driver and then runs "
+                             "this sender.\n";
+                return 2;
+            }
+            if (prep != PrepResult::Ok) {
+                if (g_stop.load()) return finishAndExit(0, "stopped");
+                std::cerr << "Could not switch on the virtual screen.\n";
+                return finishAndExit(2, "start failed");
             }
         }
 
-        if (options.hdr) {
-            if (setAdvancedColor(selected->name, true)) {
-                std::cout << "HDR enabled on the virtual display.\n";
-                Sleep(1500);  // let the framebuffer switch to 10-bit before capture
-            } else {
-                std::cout << "Could not enable HDR automatically. Turn on "
-                             "Settings > Display > Use HDR for the tablet display, "
-                             "or run without --hdr.\n";
-            }
-        } else if (selected->isVirtual) {
-            // SDR path: make sure Windows HDR is OFF on the virtual display, else
-            // the SDR capture of an HDR framebuffer looks washed-out / over-bright.
-            if (setAdvancedColor(selected->name, false)) {
-                std::cout << "Virtual display set to SDR (correct desktop colors).\n";
-                Sleep(800);  // let the framebuffer switch back to 8-bit before capture
-            }
-        }
+        std::cout << "Extended display: " << selected.name << " "
+                  << selected.width << "x" << selected.height
+                  << " (adapter " << selected.adapterIndex
+                  << ", output " << selected.outputIndex << ")\n";
 
         if (!options.noTouch) {
             std::thread(runTouchBridge, adb, options.host, options.port + 1,
-                        options.host.empty(), *selected)
+                        options.host.empty())
                 .detach();
             std::cout << "Touch input bridge active (tablet touches control Windows).\n";
         }
@@ -2591,11 +3155,10 @@ int main(int argc, char** argv) {
             std::cout << "Desktop audio bridge active (PC audio plays on the tablet).\n";
         }
 
-        const int exitCode = runSupervised(options, ffmpeg, adb, exeDir, *selected);
-        collapseToInternal();
-        return exitCode;
+        const int exitCode = runSupervised(options, ffmpeg, adb, exeDir, selected);
+        return finishAndExit(exitCode, g_stop.load() ? "stopped" : "stream ended");
     } catch (const std::exception& ex) {
-        collapseToInternal();
+        virtualScreenOff("error");
         std::cerr << "Error: " << ex.what() << "\n\n";
         printUsage();
         return 1;

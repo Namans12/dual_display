@@ -3,7 +3,7 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- Single clean UAC prompt; needed to enable/disable the VDD device. -->
+        <!-- Single clean UAC prompt; needed to load/unload the virtual display driver. -->
         <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
       </requestedPrivileges>
     </security>
@@ -16,10 +16,10 @@
   </compatibility>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
-      <!-- DPI-unaware on purpose: the dialog uses a fixed pixel layout, so we let
-           Windows bitmap-scale the whole window uniformly on high-DPI displays.
-           Correct proportions everywhere, at the cost of slightly softer text. -->
-      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">false</dpiAware>
+      <!-- Per-monitor-V2 DPI awareness: crisp text on every monitor. The launcher
+           lays itself out from 96-dpi base values and re-applies them on WM_DPICHANGED. -->
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
     </windowsSettings>
   </application>
 </assembly>
