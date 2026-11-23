@@ -22,6 +22,7 @@ merged into **`main`** of `https://github.com/Namans12/dual_display.git`.
 | `versionName` | `0.11.0` (versionCode stays 10). Installer `AppVersion` is `0.11.0` too. |
 | README Windows names | The ZIP name is gone; Releases ship `ExtendedDisplaySetup-<version>.exe`. INSTALL.md says the same. |
 | `docs/mac.md`, `CHANGELOG.md` | Updated for the built v10. |
+| Virtual screen, launcher, audio, pen, Start time (follow-up, 2026-11-24) | Screen switched by its CCD display path only (45-120 ms on, 40-250 ms off, no blink in a guided test); driver loaded while the launcher is open; launcher rewritten (per-monitor DPI aware); graceful Stop; "Mute PC speakers" works through process loopback; pen offset fixed (0 px on all three displays); Start about 2.9 s to first frame. See CHANGELOG v0.11.0. |
 | Launcher settings | The Windows launcher now remembers every option (`settings.ini`). |
 | Wrong pairing code on Windows | Before: the sender saw the tablet's instant closes as encoder failures. Now it prints `Pairing code mismatch …`, keeps retrying, and the GUI says the tablet needs the code. |
 | Stop on Windows | Verified: black screen + "Disconnected — waiting for the computer". Needed a receiver fix (late decoder frames lifted the cover). |
@@ -41,7 +42,7 @@ Found on Windows; items 1–4 and 6 fixed in a follow-up commit (see the end of 
 5. Mac host: its mismatch text says the tablet "shows a code box at the top of the screen" (now a centred
    prompt), and it still restarts the tablet app on every USB Start for v9's codec bug. Not changed here
    (`mac-host/` is out of scope); harmless with v10.
-6. Long-pressing the tablet's status label while streaming also sends that touch to the computer.
+6. Long-pressing the tablet's status label while streaming also sends that touch to the computer. (Later superseded: forgetting a pairing is now a button on the idle screen and the tablet no longer swallows touches.)
 7. Over UDP the tablet still does not show "Disconnected" when the host stops (it cannot see a UDP stream end).
 
 Follow-up fixes:
@@ -56,6 +57,7 @@ Follow-up fixes:
 - **4:** a tablet with no key now asks for the code and closes the encrypted TCP connection, so both hosts
   report it; the picture still appears by itself after the code is entered (7 s in the test).
 - **6:** a gesture that starts on the visible status label stays on the tablet.
+- **Not tested after the rework:** the Mac host with this receiver build, and a fresh install on another PC.
 - **Left:** 5 is in `mac-host/` (out of scope). 7 needs a host heartbeat (a protocol change): a receiver
   timeout alone would blank a still Mac desktop, which only sends frames on change.
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.11.0 — 2026-11-20 (receiver v10 built + Windows host, verified on device)
+## v0.11.0 — 2026-11-20 (receiver v10 built + Windows host reworked, verified on device)
 
 Receiver **v10** (versionCode 10, versionName 0.11.0) built on Windows for the
 first time and verified on a Galaxy Tab S9 Ultra with the Windows host.
@@ -19,9 +19,9 @@ first time and verified on a Galaxy Tab S9 Ultra with the Windows host.
   the saved key belongs to another computer; TCP and UDP). Large 8-character
   field limited to the code alphabet (lower case accepted). The code is checked
   against the stream immediately: a wrong one says so and is never saved; a
-  right one shows "Paired" and the picture follows by itself. Long-press the
-  status label to forget the saved code (with confirmation); forgetting now
-  also removes the saved copy. Over UDP an encrypted stream is now recognised
+  right one shows "Paired" and the picture follows by itself. A **Forget
+  pairing** button on the idle screen forgets the saved code (with
+  confirmation); forgetting now also removes the saved copy. Over UDP an encrypted stream is now recognised
   even without a key (before, its sealed packets were fed to the decoder).
 - **Fixed (receiver): grey veil with a hardware keyboard.** Key input took the
   window out of touch mode and Android drew its focus highlight over the whole
@@ -46,24 +46,61 @@ first time and verified on a Galaxy Tab S9 Ultra with the Windows host.
 - **No code on the tablet is reported too:** the tablet now closes an encrypted
   TCP stream it has no key for (after asking for the code), so the host shows
   the pairing hint instead of "Streaming".
-- A long-press on the visible status label no longer also reaches the computer.
+- The tablet no longer swallows touches, and touches on its idle screen are not sent to the computer.
 - **Windows GUI:** options are locked while streaming (they only apply at Start);
-  the window stays where you put it (Windows doubled its position when the
-  virtual display came or went, so it jumped to the bottom-right); Start no
+  the window stays where you put it (the old DPI-unaware window had its position
+  doubled by Windows when the virtual display came or went; the rewritten,
+  DPI-aware launcher below no longer needs a workaround); Start no
   longer re-applies the whole display layout, and the sender no longer re-sends
   an HDR setting that is already in place (fewer screen re-configurations).
-- **Fixed: "Mute PC speakers" streamed silence.** On this laptop (Realtek, Windows
-  build 26320) muting the speakers, or setting their volume to 0, also silences
-  Windows' audio capture (measured: peak 0.35 unmuted, 0.00 muted). The sender
-  now mutes only once sound plays, checks the stream still carries sound, and
-  otherwise un-mutes and says so (GUI: "PC speakers can't be muted on this PC").
-  It also no longer fights the volume keys in that case.
+- **Fixed: "Mute PC speakers" streamed silence.** On this laptop (Realtek, with
+  DTS/Realtek APOs) endpoint mute, or volume 0, silences device loopback
+  (measured: peak 0.35 unmuted, 0.00 muted). With mute on, the sender now captures
+  with **process loopback** (Windows 10 2004 or later), which keeps full audio
+  while the speakers are muted. The mute is held while streaming (re-asserted if
+  the volume keys un-mute) and restored to your own state afterwards. Two bugs
+  were fixed on the way: `Reset()` on a process-loopback client stops all
+  packets, and a 100 ms poll overran its buffer (choppy audio). The "PC speakers
+  can't be muted on this PC" message is gone. Verified by ear: smooth, in sync,
+  laptop silent.
+- **Windows: the virtual screen is switched by its display path only.** The
+  sender turns the screen on and off with a single CCD call for that one path
+  (switching on is never persisted, no topology flags): on in 45-120 ms, off in 40-250 ms, no
+  blink on the laptop panel or an HDMI monitor in a guided test (the old way,
+  driver load plus switch on, took 2.7 s with a blink under 1 s). The driver is
+  no longer enabled on Start and disabled on Stop. The screen goes to the right
+  of all displays and never overlaps; real monitors are never moved or re-moded.
+  Modes: 2960x1848 @120 Hz (Balanced, Best), 1920x1200 @120 Hz (Smooth). It goes
+  off on Stop, on exit, and after about 5 s without the tablet. Its off state is
+  saved, so a display change while idle (for example unplugging HDMI) cannot
+  switch it back on; the launcher also re-checks after display changes while idle.
+- **Windows launcher rewritten:** per-monitor DPI aware, Windows 11 style, two
+  columns, status pill, non-blocking Start/Stop, single instance. It finds the
+  driver by hardware ID `Root\MttVDD` and keeps it loaded while it is open
+  (measured 0.000 % CPU, 13.6 MB with the screen off), unloading it on close.
+  While the launcher is open, Windows Settings lists the screen as a
+  disconnected display (kept on purpose).
+- **Graceful Stop.** Stop signals the named event
+  `Local\ExtendedDisplaySender-Stop-<pid>`; the sender exited in 0.6 s. New dev
+  flags: `--cleanup`, `--screen-test`, `--audio-test`.
+- **Faster Start:** about 4.6 s to about 2.9 s to the first encoded frame
+  (encoder probes run in parallel; polling the tablet's listen port replaces a
+  fixed 1.5 s sleep). 3.7 s to picture through the app, as measured by hand.
+- **Fixed: S Pen offset.** Synthetic pen positions are now relative to the
+  virtual-screen origin. With a monitor left of the laptop every pen point
+  landed 1920 px left; now 0 px error on all three displays (measured, and
+  confirmed by hand with and without HDMI). Touch reads the current screen
+  rectangle on every packet.
+- **Tablet app (still versionCode 10, 0.11.0):** immersive full screen, an
+  original code-drawn gradient idle screen, a new adaptive icon (ported from the
+  Mac icon), decoder reuse across connections, and fixes from an independent
+  review.
 - Byte format, key derivation and encryption unchanged.
-- Verified with the Windows host: USB and Wi-Fi (TCP and UDP), plaintext and
-  encrypted, finger touch over the encrypted link, desktop audio stream set up
-  (plaintext and encrypted). Not verified: S Pen (adb cannot inject a hover),
-  that audio is audible, smoothness by eye, the Mac host with v10, display
-  selection with a real second monitor plugged in (after the change).
+- Verified on the tablet over USB: Balanced 59 fps, Smooth 118 fps at
+  1920x1200, Wi-Fi TCP 58 fps, Wi-Fi UDP 59 fps, encrypted with a saved key
+  59 fps. Touch, pen and audio work; Stop and closing the app work; laptop +
+  tablet only, and with HDMI including hot-plug mid-stream. Not tested: the Mac
+  host with this receiver build, and a fresh install on another PC.
 
 ## v0.10.0 — 2026-11-15 (Mac package, verified on device; receiver v10 pending a Windows build)
 

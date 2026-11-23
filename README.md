@@ -12,7 +12,7 @@ Quick version — with the installer **`ExtendedDisplaySetup-<version>.exe`** fr
 
 1. **Install the virtual display driver once:** right-click **`Install-Driver.bat`** → Run as administrator, then **reboot once**. (Or run `ExtendedDisplaySetup.exe` with the driver option ticked.)
 2. On the tablet: enable Developer Options → USB debugging (USB path), or sideload `ExtendedDisplayReceiver.apk` (Wi-Fi path).
-3. Double-click **`ExtendedDisplay.exe`** — the settings GUI. Pick USB/Wi-Fi, codec, HDR, touch, then **Start Streaming**. **Stop** cleanly removes the virtual display.
+3. Double-click **`ExtendedDisplay.exe`** — the settings GUI. Pick USB/Wi-Fi, codec, HDR, touch, then **Start Streaming**. **Stop** switches the virtual screen off again.
 
 The GUI just drives `ExtendedDisplaySender.exe`, which you can also run directly:
 
@@ -40,7 +40,7 @@ What the Mac host does: a native extended display at 2960×1848 and a real 60 fp
 | **Codecs** | H.264 + **HEVC** (HDR uses HEVC Main10). Encoder auto-ladder: NVENC → Intel QSV → AMD AMF → **Media Foundation** → x264/x265, so it works on any GPU. |
 | **Transport** | **USB** (adb) and **Wi-Fi** with zero-config discovery. Video over reliable TCP or low-latency **UDP**; touch always on reliable TCP. |
 | **Input** | Multi-touch, two-finger scroll/pinch, long-press right-click, and **S Pen** with pressure / hover / eraser → injected as real Windows touch + pen. |
-| **Audio** | Optional **desktop audio** (PC → tablet) via WASAPI loopback → the tablet's speakers. No extra driver; encrypted with the rest of the link when paired. Optional "Mute PC speakers" makes sound play on the tablet only. |
+| **Audio** | Optional **desktop audio** (PC → tablet) via WASAPI loopback → the tablet's speakers. No extra driver; encrypted with the rest of the link when paired. Optional "Mute PC speakers" makes sound play on the tablet only (captured with process loopback, so muting keeps full audio; Windows 10 2004+). |
 | **Security** | Optional **PIN pairing + AES-256-GCM** on every channel (video, touch, audio) for untrusted Wi-Fi — see [SECURITY.md](SECURITY.md). |
 
 ## How It Works
@@ -54,7 +54,7 @@ What the Mac host does: a native extended display at 2960×1848 and a real 60 fp
   │  TCP (tcp://tablet:5000)  or  UDP fragments (--udp)          │
   │     ↑ touch/S-Pen, always TCP 5001                           │
   │     ↓ desktop audio (WASAPI loopback), TCP 5003 (--audio)    │
-  └──── discovery: UDP broadcast 5002 ; lifecycle: CCD topology ─┘
+  └──── discovery: UDP broadcast 5002 ; lifecycle: CCD path switch ─┘
                           ↕  USB (adb) or Wi-Fi
   ┌─ Android app ───────────────────────────────────────────────┐
   │  TCP splitter + UDP reassembler → MediaCodec → SurfaceView   │
@@ -63,12 +63,12 @@ What the Mac host does: a native extended display at 2960×1848 and a real 60 fp
   └─────────────────────────────────────────────────────────────┘
 ```
 
-The virtual display exists **only while streaming**: the sender extends onto it via the Windows CCD topology API on connect and collapses back on exit (no elevation, no leftover monitor). See [docs/protocol.md](docs/protocol.md) for wire formats.
+The virtual screen is **on only while streaming**: the driver stays loaded while the launcher is open (about 14 MB, 0 % CPU), and the sender switches the screen on once a tablet is found and off again on Stop, on exit and after about 5 s without the tablet. It uses only that screen's own CCD display path (about 45-120 ms on, 40-250 ms off, no visible blink in a guided test); real monitors are never moved or re-moded. While the launcher is open, Windows Settings lists the screen as a disconnected display. See [docs/protocol.md](docs/protocol.md) for wire formats.
 
 ## Project Layout
 
 ```text
-windows-sender/     C++ host: display discovery, VDD topology, USB/Wi-Fi
+windows-sender/     C++ host: display discovery, VDD screen switching, USB/Wi-Fi
                     transport, encoder ladder, ffmpeg supervision, touch inject
 windows-sender/launcher/  C# WinForms settings GUI (ExtendedDisplay.exe)
 android-receiver/   Kotlin app: MediaCodec decode, TCP/UDP receive, touch uplink
@@ -91,8 +91,8 @@ See [docs/build.md](docs/build.md) for building each component and the full CLI,
 - **Washed out / over-bright** — the SDR path auto-disables Windows HDR on the virtual display for correct colours; only pass `--hdr` for real HDR content.
 - **Touch does nothing** — use the bundled app (v10; the sender installs it over USB); tap directly on windows/icons on the tablet (touch ≠ mouse cursor).
 - **ddagrab errors** — needs Windows 10 1903+ and a full GPL FFmpeg (the installer bundles one). `AcquireNextFrame failed: 887a0026` on every non-primary display (black, then a dropped stream) was seen once on an Insider build after about two weeks of uptime and cleared with a reboot.
-- **Desktop audio** plays on the tablet and the PC. "Mute PC speakers" works only where muting doesn't also silence Windows' audio capture; on PCs where it does (the sender checks), the speakers stay on and the GUI says so.
-- **Tablet asks for a code** — the PC has **Encrypt** on and the tablet does not have this PC's code. Type the 8 characters shown in the GUI; the picture appears by itself. Long-press the status text on the tablet to forget a saved code.
+- **Desktop audio** plays on the tablet and the PC. Tick "Mute PC speakers" to silence the PC: the sender then captures with process loopback (Windows 10 2004 or later), which keeps full audio while muted. The mute is held while streaming and restored to your own state afterwards.
+- **Tablet asks for a code** — the PC has **Encrypt** on and the tablet does not have this PC's code. Type the 8 characters shown in the GUI; the picture appears by itself. Press **Forget pairing** on the tablet's idle screen to forget a saved code.
 
 ## Roadmap (not yet built)
 

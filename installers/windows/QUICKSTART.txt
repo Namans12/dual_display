@@ -34,7 +34,8 @@ RUN IT
       - Quality: Best resolution / Balanced / Smooth motion (120 fps)
       - Touch, HDR, HEVC as desired (hover the i markers for details)
       - Desktop audio: play the PC's sound on the tablet. Sub-options:
-          * Mute PC speakers  = sound comes only from the tablet
+          * Mute PC speakers  = sound comes only from the tablet (full audio
+            is kept; needs Windows 10 version 2004 or later)
           * A/V sync delay (ms) = nudge if audio/video drift (default 40)
       - Encrypt: mint a pairing code (shown in the GUI). Type it once on
         the tablet to encrypt video + touch + audio (for untrusted Wi-Fi).
@@ -44,11 +45,15 @@ RUN IT
      app is open on the tablet.
    - If you ticked Encrypt: type the shown code on the tablet; video +
      audio start once it's paired.
-4. Click  Stop  when done — the virtual display disappears cleanly.
+4. Click  Stop  when done — the virtual screen switches off. (Close the
+   window to unload the driver; while it is open, Windows Settings lists the
+   screen as a disconnected display.)
 
 --------------------------------------------------------------------
 NOTES
 --------------------------------------------------------------------
+- The tablet app shows an idle screen until the PC connects; its Forget pairing
+  button clears a saved pairing code.
 - Touch works like a touchscreen: tap = click, drag = move/scroll. Tap
   directly on windows/icons shown on the tablet.
 - Colours are SDR by default (correct for desktop). Use the HDR option only

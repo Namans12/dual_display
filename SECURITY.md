@@ -105,8 +105,8 @@ can't authenticate it, it reports "wrong pairing code" and disconnects.
    - **Pairing prompt (v0.11.0, receiver v10):** the tablet asks for the code only
      when an encrypted stream arrives that it cannot open, checks a typed code
      against a frame of that stream before saving it (a wrong code is reported
-     and never saved), and can forget the saved key (long-press the status
-     label). The Windows and Mac hosts report a pairing mismatch when the tablet
+     and never saved), and can forget the saved key (the **Forget pairing**
+     button on the idle screen). The Windows and Mac hosts report a pairing mismatch when the tablet
      keeps closing the encrypted stream. Key derivation and framing unchanged.
    Remaining polish (todo): optional open-LAN toggle.
 
