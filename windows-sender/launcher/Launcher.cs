@@ -719,8 +719,31 @@ namespace ExtendedDisplay
                 m.Result = IntPtr.Zero;
                 return;
             }
+            if (m.Msg == WM_DISPLAYCHANGE && state == AppState.Ready && !noDriver)
+            {
+                // Windows re-applies a saved layout on any display change (a monitor
+                // plugged in or out, docking, waking up), which can switch the idle
+                // virtual screen back on (measured: unplugging HDMI did). While idle,
+                // switch it off again once the change settles. --cleanup is a no-op
+                // when it is already off, so this can't loop.
+                if (displayChangeTimer == null)
+                {
+                    displayChangeTimer = new System.Windows.Forms.Timer { Interval = 800 };
+                    displayChangeTimer.Tick += (s, e) =>
+                    {
+                        displayChangeTimer.Stop();
+                        if (state == AppState.Ready && !closing)
+                            ThreadPool.QueueUserWorkItem(_ => RunCleanup(3000));
+                    };
+                }
+                displayChangeTimer.Stop();
+                displayChangeTimer.Start();
+            }
             base.WndProc(ref m);
         }
+
+        const int WM_DISPLAYCHANGE = 0x007E;
+        System.Windows.Forms.Timer displayChangeTimer;
 
         // ── State / status presentation ──────────────────────────────────
         void Post(Action a)

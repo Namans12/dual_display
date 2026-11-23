@@ -740,10 +740,14 @@ bool virtualScreenOff(const char* reason, bool announce, bool force) {
             if (isVddPath(p)) { p.flags &= ~DISPLAYCONFIG_PATH_ACTIVE; found = true; }
         }
         if (found) {
+            // Saved: Windows keeps a layout per set of connected screens and re-applies
+            // it on any display change. Old builds saved the virtual screen as ON, so
+            // unplugging HDMI while idle switched it back on (measured). Saving the off
+            // state records the other screens exactly as they are now, unchanged.
             const LONG rc = SetDisplayConfig(static_cast<UINT32>(paths.size()), paths.data(),
                                              static_cast<UINT32>(modes.size()), modes.data(),
                                              SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG |
-                                                 SDC_ALLOW_CHANGES);
+                                                 SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
             switched = rc == ERROR_SUCCESS;
             if (g_ccdVerbose) std::cout << "  SetDisplayConfig (switch off) rc=" << rc << "\n";
             if (!switched) std::cerr << "Could not switch the virtual screen off (code " << rc << ").\n";
