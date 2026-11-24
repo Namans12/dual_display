@@ -1,7 +1,12 @@
-# Security design — PIN pairing + encrypted LAN streams
+# Security design - PIN pairing + encrypted LAN streams
 
-Status: **in progress.** Threat model, design, and staging for encrypting the
-Wi-Fi/USB link so it's safe on an untrusted LAN.
+## Reporting a vulnerability
+
+Please report security problems privately: on GitHub, open this repository's **Security** tab and choose **Report a vulnerability**. Don't open a public issue for them. You'll get a reply there, and a fix will be released before details are made public.
+
+Status: **shipped** (since v0.8.0; Windows and Mac hosts). Below: the threat model,
+the design, and how it was staged, for encrypting the Wi-Fi/USB link so it's safe on
+an untrusted LAN.
 
 ## Threat model
 

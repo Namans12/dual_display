@@ -27,6 +27,7 @@ Name: "installvdd"; Description: "Install the &virtual display driver (gives one
 Source: "payload\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "install-vdd.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "uninstall-vdd.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; Shortcuts point at the settings GUI (the recommended entry point). It manages
