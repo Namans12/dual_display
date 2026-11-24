@@ -86,6 +86,9 @@ first time and verified on a Galaxy Tab S9 Ultra with the Windows host.
 - **Faster Start:** about 4.6 s to about 2.9 s to the first encoded frame
   (encoder probes run in parallel; polling the tablet's listen port replaces a
   fixed 1.5 s sleep). 3.7 s to picture through the app, as measured by hand.
+- **Tablet follows an upside-down flip** (sensorLandscape): the picture turns to
+  stay upright and touch and the S Pen still land under the finger or pen tip
+  (verified by hand). Portrait is not supported.
 - **Fixed: S Pen offset.** Synthetic pen positions are now relative to the
   virtual-screen origin. With a monitor left of the laptop every pen point
   landed 1920 px left; now 0 px error on all three displays (measured, and

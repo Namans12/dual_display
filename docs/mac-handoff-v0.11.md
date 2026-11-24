@@ -25,6 +25,18 @@ Read README.md, CHANGELOG.md (the v0.11.0 entry), docs/mac.md and docs/protocol.
   VPS/SPS/PPS for HEVC. MacHost.swift's `AnnexBEncoder` already writes them before every keyframe.
 - User-facing text uses plain hyphens, not em or en dashes.
 
+## Known Mac items to fix (from the Windows session)
+- **The Mac app still says "Extended Display".** Rename it to **DualSlate** everywhere a user sees
+  it (task 2).
+- **Its pairing hint says the code box is "at the top".** The tablet now shows a centred code
+  prompt, so the text must say that (task 3).
+- **An APK built on the Mac won't install over the Windows-built one.** Each computer signs the
+  tablet app with its own debug key. Don't uninstall the tablet app to get around it: that wipes
+  the saved pairing. Copy the Windows debug key to the Mac first (see "APK signing" under Rules).
+- **Upside-down landscape.** The tablet app now follows a 180-degree flip (sensorLandscape).
+  Check that touch and the S Pen still land correctly with the tablet flipped, with the Mac
+  host too.
+
 ## Tasks (in this order; report what you ran and what you saw; never call something untested "working")
 1. **Compatibility check, no code changes.** Build and run the Mac app against the tablet with
    receiver v10 (0.11.0) installed. Check:
