@@ -2471,8 +2471,12 @@ size_t annexBNextStart(const unsigned char* b, size_t size, size_t from) {
 // for every NAL (start code included). flush is true on the last NAL of a batch
 // that may be written out; frameEnd is true only when that NAL is PROVEN to end a
 // frame (AVI chunk boundary), i.e. an AUD may follow it.
+// Returns true when it gave up on a corrupt stream (ffmpeg is then still running and
+// the pipe still open: the caller must stop it). aviMode is set once the stream is
+// known to be AVI, i.e. frame ends are proven and a frame-end AUD can be added.
 template <class KeepGoing, class Emit>
-void pumpAnnexB(HANDLE pipe, const char* tag, KeepGoing keepGoing, Emit emit) {
+bool pumpAnnexB(HANDLE pipe, const char* tag, KeepGoing keepGoing, Emit emit, bool& aviMode) {
+    aviMode = false;
     constexpr size_t kMaxChunk = 64u << 20;  // a frame this big means a corrupt stream
     HoldStats stats;
     stats.init(tag);
@@ -2500,6 +2504,7 @@ void pumpAnnexB(HANDLE pipe, const char* tag, KeepGoing keepGoing, Emit emit) {
                 if (std::memcmp(p, "RIFF", 4) == 0 && std::memcmp(p + 8, "AVI ", 4) == 0) {
                     pos += 12;
                     mode = kAviTop;
+                    aviMode = true;
                 } else {
                     mode = kRaw;
                 }
@@ -2525,6 +2530,15 @@ void pumpAnnexB(HANDLE pipe, const char* tag, KeepGoing keepGoing, Emit emit) {
             }
             if (mode == kAviMovi) {
                 if (avail < 8) break;
+                // ffmpeg does not split a non-seekable (pipe) AVI into OpenDML "AVIX"
+                // RIFFs (measured: 1.3 GB, none), but a build that does would start
+                // "RIFF <size> AVIX" + "LIST <size> movi": step into those containers
+                // (12-byte headers) instead of reading them as a leaf chunk.
+                if (avail >= 12 && (std::memcmp(p, "RIFF", 4) == 0 ||
+                                    (std::memcmp(p, "LIST", 4) == 0 && std::memcmp(p + 8, "movi", 4) == 0))) {
+                    pos += 12;
+                    continue;
+                }
                 const size_t sz = static_cast<size_t>(p[4]) | (static_cast<size_t>(p[5]) << 8) |
                                   (static_cast<size_t>(p[6]) << 16) | (static_cast<size_t>(p[7]) << 24);
                 if (sz > kMaxChunk) { bad = true; break; }
@@ -2532,8 +2546,10 @@ void pumpAnnexB(HANDLE pipe, const char* tag, KeepGoing keepGoing, Emit emit) {
                 if (avail < total) break;  // the rest of this frame is still on its way
                 if (p[2] == 'd' && (p[3] == 'c' || p[3] == 'b') && sz > 0) {
                     const unsigned char* f = p + 8;
-                    size_t base = 0;
-                    for (;;) {
+                    // Start at the first start code: leading zero bytes before it are
+                    // not a NAL (a chunk with no start code at all is skipped).
+                    size_t base = annexBNextStart(f, sz, 0);
+                    while (base != std::string::npos) {
                         const size_t next = annexBNextStart(f, sz, base + annexBStartLen(f + base, sz - base));
                         const size_t end = next == std::string::npos ? sz : next;
                         const bool last = next == std::string::npos;
@@ -2568,6 +2584,7 @@ void pumpAnnexB(HANDLE pipe, const char* tag, KeepGoing keepGoing, Emit emit) {
             pos = 0;
         }
     }
+    return bad;
 }
 
 // ------------------------------------------------------------- udp streaming
@@ -2756,15 +2773,20 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
         ++nalSeq;
     };
 
-    pumpAnnexB(readPipe, "udp", [] { return !g_stop.load(); },
-               [&](const unsigned char* nal, size_t len, bool, bool) { sendNal(nal, len); });
+    bool udpAvi = false;
+    const bool udpBad = pumpAnnexB(readPipe, "udp", [] { return !g_stop.load(); },
+               [&](const unsigned char* nal, size_t len, bool, bool) { sendNal(nal, len); }, udpAvi);
 
-    WaitForSingleObject(pi.hProcess, g_stop.load() ? 0 : INFINITE);
-    if (g_stop.load()) TerminateProcess(pi.hProcess, 1);
+    // A corrupt stream ends the pump while ffmpeg keeps running with the pipe open:
+    // stop it instead of waiting for an exit that never comes.
+    WaitForSingleObject(pi.hProcess, (g_stop.load() || udpBad) ? 0 : INFINITE);
+    if (g_stop.load() || udpBad) TerminateProcess(pi.hProcess, 1);
     ULONGLONG uptime = GetTickCount64() - started;
-    // Don't let a non-zero ffmpeg exit count as a "proven" config.
+    // Don't let a non-zero ffmpeg exit count as a "proven" config (but a stop we
+    // asked for kills it with exit code 1: that is not a failure).
     DWORD exitCode = 0;
-    if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0 && exitCode != STILL_ACTIVE) {
+    if (udpBad || (!g_stop.load() && GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0 &&
+                   exitCode != STILL_ACTIVE)) {
         uptime = 0;
     }
     g_child.exchange(nullptr);  // claim before close so the ctrl handler can't race
@@ -2840,6 +2862,8 @@ ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host
     std::vector<uint8_t> blob;
     std::vector<unsigned char> out;  // one send() per NAL (encrypted) / per frame (plain)
     bool alive = encrypted ? encOk : true;
+    bool tcpAvi = false;       // set by the pump: frame ends are proven (frame-end AUD allowed)
+    bool batchHasSlice = false;  // the batch being assembled contains a picture slice
 
     // Encrypted: [4-byte BE length][nonce+ct+tag] per NAL in ONE send().
     // Plain: the frame's NALs go out in ONE send(), followed by an AUD that marks
@@ -2868,40 +2892,52 @@ ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host
         const bool isAud = sc > 0 && len > static_cast<size_t>(sc) &&
             (hevc ? (((nal[sc] >> 1) & 0x3F) == 35 && (nal[sc] & 0x80) == 0)
                   : ((nal[sc] & 0x9F) == 0x09));
-        if (!isAud) out.insert(out.end(), nal, nal + len);
+        // Only replace the encoder's own AUD when ours will follow the frame (AVI
+        // mode); the legacy raw stream keeps theirs.
+        if (!(isAud && tcpAvi)) out.insert(out.end(), nal, nal + len);
+        if (sc > 0 && len > static_cast<size_t>(sc)) {
+            const int t = hevc ? ((nal[sc] >> 1) & 0x3F) : (nal[sc] & 0x1F);
+            if (hevc ? t < 32 : (t >= 1 && t <= 5)) batchHasSlice = true;
+        }
         if (!flush) return;
         if (out.empty()) return;
-        if (frameEnd) {
+        // An AUD opens a NEW access unit: add it only after a batch that holds a
+        // picture slice (parameter sets alone would leave an empty access unit).
+        if (frameEnd && batchHasSlice) {
             if (hevc) out.insert(out.end(), kAudHevc, kAudHevc + sizeof(kAudHevc));
             else out.insert(out.end(), kAudH264, kAudH264 + sizeof(kAudH264));
         }
+        batchHasSlice = false;
         if (!sendAll(sock, out.data(), static_cast<int>(out.size()))) alive = false;
         out.clear();
     };
 
     bool announced = !announceStable;
-    pumpAnnexB(readPipe, encrypted ? "tcp-enc" : "tcp", [&] { return !g_stop.load() && alive; },
+    const bool tcpBad = pumpAnnexB(readPipe, encrypted ? "tcp-enc" : "tcp", [&] { return !g_stop.load() && alive; },
                [&](const unsigned char* nal, size_t len, bool flush, bool frameEnd) {
                    if (!announced && GetTickCount64() - started >= kProvenUptimeMs) {
                        announced = true;
                        std::cout << "Tablet accepted the pairing code - streaming." << std::endl;
                    }
                    sendNal(nal, len, flush, frameEnd);
-               });
+               }, tcpAvi);
 
     // ffmpeg only exits on its own when ITS pipe breaks. If the tablet dropped the
     // TCP connection (alive == false, e.g. the app restarted), ffmpeg is still
     // running and blocked on the now-undrained pipe — waiting INFINITE here would
     // deadlock the whole session. Kill it so the supervisor can reconnect.
-    peerClosed = encrypted && encOk && !alive;
-    WaitForSingleObject(pi.hProcess, (g_stop.load() || !alive) ? 0 : INFINITE);
+    // Any TCP peer that dropped the connection (plain or encrypted) is reported, so
+    // the supervisor reconnects with the SAME encoder; only the pairing-mismatch
+    // prompt is specific to encrypted streams.
+    peerClosed = (!encrypted || encOk) && !alive;
+    WaitForSingleObject(pi.hProcess, (g_stop.load() || !alive || tcpBad) ? 0 : INFINITE);
     TerminateProcess(pi.hProcess, 1);  // no-op if it already exited
     ULONGLONG uptime = GetTickCount64() - started;
     DWORD exitCode = 0;
     // A peer disconnect (!alive) is a clean stream end, not an encoder failure —
     // keep the uptime so the supervisor reconnects instead of walking the ladder.
-    if (alive && GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0 &&
-        exitCode != STILL_ACTIVE) {
+    if (tcpBad || (alive && !g_stop.load() && GetExitCodeProcess(pi.hProcess, &exitCode) &&
+                   exitCode != 0 && exitCode != STILL_ACTIVE)) {
         uptime = 0;
     }
     g_child.exchange(nullptr);
@@ -3036,12 +3072,23 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
             uptime = runEncryptedTcpAttempt(cmd, host, options.port, peerClosed,
                                             encTcp && mismatchReported, options.hevc);
             if (g_stop.load()) break;
+            if (peerClosed && uptime < kProvenUptimeMs && !encTcp) {
+                // Plaintext: the tablet closed the connection (app restarted, cable
+                // blip) soon after it opened. That is not an encoder failure: retry
+                // the SAME encoder, never walk the ladder.
+                sleepInterruptible(1500);
+                continue;
+            }
             if (peerClosed && uptime < kProvenUptimeMs) {
                 // The tablet took the connection and closed it at once. Twice in a
                 // row is a pairing mismatch: say so and keep retrying with the SAME
                 // encoder (before, this walked the encoder ladder and gave up with
                 // "All encoder configurations failed").
-                if (++shortDrops >= 2 && !mismatchReported) {
+                if (++shortDrops == 1) {
+                    sleepInterruptible(1500);  // first quick close: just retry, not an encoder failure
+                    continue;
+                }
+                if (!mismatchReported) {
                     mismatchReported = true;
                     std::cout << "Pairing code mismatch - the tablet keeps closing the encrypted "
                                  "stream. Enter this PC's pairing code on the tablet (it is "
