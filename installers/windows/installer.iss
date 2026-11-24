@@ -35,9 +35,8 @@ Name: "{autoprograms}\DualSlate"; Filename: "{app}\DualSlate.exe"
 Name: "{autodesktop}\DualSlate"; Filename: "{app}\DualSlate.exe"; Tasks: desktopicon
 
 [Run]
-; Install the VirtualDrivers VDD. The app loads it while open and switches only its
-; screen on while streaming, so there's no extra active display while idle.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-vdd.ps1"" -AppDir ""{app}"""; StatusMsg: "Installing the virtual display driver..."; Flags: runhidden waituntilterminated; Tasks: installvdd
+; The virtual display driver is installed from [Code] (CurStepChanged), so that it has
+; finished before Setup decides whether a restart is needed.
 Filename: "{app}\DualSlate.exe"; Description: "Launch DualSlate now"; Flags: nowait postinstall skipifsilent
 
 [InstallDelete]
@@ -46,6 +45,45 @@ Type: files; Name: "{app}\ExtendedDisplay.exe"
 ; Shortcuts left by releases named "Extended Display".
 Type: files; Name: "{autoprograms}\Extended Display.lnk"
 Type: files; Name: "{autodesktop}\Extended Display.lnk"
+Type: files; Name: "{userdesktop}\Extended Display.lnk"
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall-vdd.ps1"" -AppDir ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveVdd"
+
+[Code]
+// Install the VirtualDrivers VDD (installvdd task). The app loads the driver while it is
+// open and switches only its screen on while streaming, so there's no extra active
+// display while idle.
+var
+  DriverStepDone: Boolean;
+
+// Runs install-vdd.ps1 once. Measured: Setup asks NeedRestart BEFORE ssPostInstall, so
+// the driver step runs from whichever comes first, and NeedRestart then sees its result.
+procedure InstallDriverOnce();
+var
+  rc: Integer;
+begin
+  if DriverStepDone or not WizardIsTaskSelected('installvdd') then exit;
+  DriverStepDone := True;
+  WizardForm.StatusLabel.Caption := 'Installing the virtual display driver...';
+  DeleteFile(ExpandConstant('{app}\driver-pending.flag'));  // only this run's result counts
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\install-vdd.ps1') +
+    '" -AppDir "' + ExpandConstant('{app}') + '"', '', SW_HIDE, ewWaitUntilTerminated, rc);
+  Log('install-vdd.ps1 exit code: ' + IntToStr(rc));
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then InstallDriverOnce();
+end;
+
+// install-vdd.ps1 leaves this flag when Windows must restart before the display
+// driver can attach (it then finishes by itself at the next start). Inno Setup asks
+// the user to restart; a silent install with /NORESTART never restarts.
+function NeedRestart(): Boolean;
+begin
+  InstallDriverOnce();
+  Result := FileExists(ExpandConstant('{app}\driver-pending.flag'));
+  if Result then Log('Virtual display driver: restart needed to finish.');
+end;

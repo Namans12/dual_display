@@ -27,20 +27,61 @@ $cfgDir = 'C:\VirtualDisplayDriver'
 New-Item -ItemType Directory -Force $cfgDir | Out-Null
 Copy-Item (Join-Path $vdd 'vdd_settings.xml') (Join-Path $cfgDir 'vdd_settings.xml') -Force
 
-# Add to the driver store (native exe: check the exit code, since $ErrorAction
-# does not catch native failures).
-& pnputil.exe /add-driver "$inf" /install
-if ($LASTEXITCODE -ne 0) { throw "pnputil /add-driver failed (exit $LASTEXITCODE)" }
+$taskName = 'DualSlate driver setup'
+$pendingFlag = Join-Path $AppDir 'driver-pending.flag'
 
-# Create the root-enumerated device node — only if absent, so reinstalls never
-# stack duplicate displays.
-$existing = Get-PnpDevice -FriendlyName '*Virtual Display Driver*' -ErrorAction SilentlyContinue
-if ($existing) {
+# Device nodes are found by hardware ID, never by name: a node whose driver did not
+# attach has no friendly name, and the old name-based check then stacked a duplicate.
+function Get-VddNodes { @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'Root\MttVDD' }) }
+function Test-Bound($node) {
+    [bool](Get-PnpDeviceProperty -InstanceId $node.InstanceId -KeyName DEVPKEY_Device_DriverInfPath -ErrorAction SilentlyContinue).Data
+}
+function Remove-UnboundNodes {
+    foreach ($n in Get-VddNodes) {
+        if (-not (Test-Bound $n)) { & pnputil.exe /remove-device "$($n.InstanceId)" | Out-Null }
+    }
+}
+
+# Add to the driver store (native exe: check the exit code, since $ErrorAction does not
+# catch native failures). 3010 = success, restart recommended.
+& pnputil.exe /add-driver "$inf" /install
+if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { throw "pnputil /add-driver failed (exit $LASTEXITCODE)" }
+
+Remove-UnboundNodes  # leftovers of an earlier failed attempt
+$bound = @(Get-VddNodes | Where-Object { Test-Bound $_ })
+if ($bound.Count -gt 0) {
     Write-Host 'VDD device already present; refreshed driver + config only.'
+    # Exactly one virtual display: drop extra nodes so reinstalls never stack displays.
+    $bound | Select-Object -Skip 1 | ForEach-Object { & pnputil.exe /remove-device "$($_.InstanceId)" | Out-Null }
 } else {
     & $devcon install "$inf" 'Root\MttVDD'
-    if ($LASTEXITCODE -ne 0) { throw "devcon install failed (exit $LASTEXITCODE)" }
+    Start-Sleep -Seconds 2
+    if (-not (Get-VddNodes | Where-Object { Test-Bound $_ })) {
+        # Measured: after the driver was uninstalled, Windows keeps the old package
+        # pending deletion and refuses to attach a fresh copy ("no compatible drivers")
+        # until it restarts. Finish automatically at the next start (as SYSTEM, which may
+        # install drivers) and let the installer ask for a restart.
+        Remove-UnboundNodes
+        # The ScheduledTasks cmdlets, not schtasks.exe: Windows PowerShell 5.1 mangles the
+        # quoted paths in /TR, and the task was silently never created (measured).
+        $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $action = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -AppDir `"$AppDir`""
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger (New-ScheduledTaskTrigger -AtStartup) `
+            -User 'NT AUTHORITY\SYSTEM' -RunLevel Highest -Force | Out-Null
+        Set-Content -Path $pendingFlag -Value 'The virtual display driver finishes installing at the next restart.'
+        Write-Host 'VDD: Windows needs a restart to finish installing the driver; scheduled for the next start.'
+        return
+    }
 }
-# The monitor is created inactive; the sender extends onto it on demand. No
-# phantom display while idle.
-Write-Host 'VDD installed.'
+
+# Installed: clear any pending-restart leftovers.
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+Remove-Item $pendingFlag -ErrorAction SilentlyContinue
+
+# Leave the driver unloaded: DualSlate loads it while the app is open and switches only
+# its screen on while streaming. Otherwise Windows may show the new monitor as an active
+# extra display right after install. Real monitors are not touched.
+Start-Sleep -Seconds 2
+Get-VddNodes | Where-Object { $_.Status -eq 'OK' } |
+    Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue
+Write-Host 'VDD installed (unloaded until DualSlate is opened).'

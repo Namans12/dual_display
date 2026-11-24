@@ -4,9 +4,16 @@ param([string]$AppDir = $PSScriptRoot)
 $ErrorActionPreference = 'Continue'
 $vdd = Join-Path $AppDir 'VDD'
 
-# Collapse to the primary display first so nothing is left extended onto the VDD.
-Add-Type -Namespace Win -Name Cfg -MemberDefinition '[DllImport("user32.dll")] public static extern int SetDisplayConfig(uint a, IntPtr b, uint c, IntPtr d, uint f);'
-[Win.Cfg]::SetDisplayConfig(0, [IntPtr]::Zero, 0, [IntPtr]::Zero, 0x81) | Out-Null  # APPLY|TOPOLOGY_INTERNAL
+# Stop the app if it is running, then switch ONLY the virtual screen off. (This used
+# to apply TOPOLOGY_INTERNAL, which also turned off every real external monitor.)
+Get-Process DualSlate, ExtendedDisplay, ExtendedDisplaySender -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+$sender = Join-Path $AppDir 'ExtendedDisplaySender.exe'
+if (Test-Path $sender) { & $sender --cleanup | Out-Null }
+
+# A driver install still waiting for a restart (install-vdd.ps1) must not run later.
+Unregister-ScheduledTask -TaskName 'DualSlate driver setup' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $AppDir 'driver-pending.flag') -ErrorAction SilentlyContinue
 
 $devcon = Join-Path $vdd 'devcon.exe'
 if (Test-Path $devcon) {
@@ -18,7 +25,10 @@ if (Test-Path $devcon) {
 try {
     $pkg = (pnputil /enum-drivers) -join "`n"
     # Find the published oemNN.inf whose original name is MttVDD.inf.
-    $matches = [regex]::Matches($pkg, '(?ms)Published Name:\s*(oem\d+\.inf).*?Original Name:\s*MttVDD\.inf')
+    # Case-insensitive: pnputil lists it as "mttvdd.inf" (the old case-sensitive match
+    # never deleted anything, so packages piled up). Stops at the next "Published Name"
+    # so one package's name can't pair with another's.
+    $matches = [regex]::Matches($pkg, '(?ims)Published Name:\s*(oem\d+\.inf)(?:(?!Published Name).)*?Original Name:\s*mttvdd\.inf')
     foreach ($m in $matches) {
         & pnputil.exe /delete-driver $m.Groups[1].Value /uninstall /force | Out-Null
     }

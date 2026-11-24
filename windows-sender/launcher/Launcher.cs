@@ -851,6 +851,16 @@ namespace ExtendedDisplay
         void OnLoaded(Vdd.Result r, string detail)
         {
             if (closing) return;
+            if (r == Vdd.Result.NotInstalled &&
+                File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "driver-pending.flag")))
+            {
+                // install-vdd.ps1: Windows must restart before the driver can attach; it
+                // finishes by itself at the next start.
+                SetState(AppState.Fault);
+                SetPill("Restart needed", Tone.Warn);
+                SetDetail("Restart Windows once to finish installing the virtual display driver. It completes by itself during the restart; then open DualSlate again.");
+                return;
+            }
             if (r == Vdd.Result.NotInstalled)
             {
                 SetState(AppState.Fault);
