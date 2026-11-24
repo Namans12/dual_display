@@ -1693,6 +1693,12 @@ private class AudioReceiver {
  *
  * Reads in chunks and scans with a sliding window — no per-byte allocations.
  * A NAL is emitted when the next start code is found, or when the stream ends.
+ * The one exception is an access-unit delimiter (H.264 type 9, HEVC type 35):
+ * its length is fixed, so it is emitted as soon as its bytes are in. The Windows
+ * sender appends one right after every frame; the start code it brings ends the
+ * frame's last NAL immediately instead of one frame interval later, when the next
+ * frame's start code arrives. Streams without delimiters (the Mac host, older
+ * senders) are split exactly as before.
  */
 private class AnnexBNalSplitter(private val input: InputStream) {
     private var buffer = ByteArray(1 shl 16)
@@ -1700,6 +1706,23 @@ private class AnnexBNalSplitter(private val input: InputStream) {
     private var scan = 0            // next index to scan for a start code
     private var nalStart = -1       // index where the current NAL begins (start code included)
     private var eof = false
+
+    // Dev-only hold measurement (adb shell setprop debug.extdisplay.hold 1, then
+    // reconnect): how long a NAL's last byte sat in the splitter before the NAL
+    // was handed on. Off by default; costs one boolean test per NAL.
+    private val stats = HoldStats.create()
+    private var readStart = 0       // buffer index where the latest read's bytes begin
+    private var readTime = 0L       // when the latest read returned (ns)
+    private var prevReadTime = 0L   // ... and the one before it
+
+    private fun emitted(nalEnd: Int) {
+        // nalEnd: exclusive end of the NAL just cut out. If its last byte came in
+        // with the latest read it waited for nothing; otherwise it waited since the
+        // read before (the start code that ended it was in the latest read).
+        if (!stats.on) return
+        val held = if (nalEnd - 1 >= readStart) 0L else readTime - prevReadTime
+        stats.add(held)
+    }
 
     fun nextNal(): ByteArray? {
         while (true) {
@@ -1716,9 +1739,24 @@ private class AnnexBNalSplitter(private val input: InputStream) {
             val next = findStartCode(scan)
             if (next >= 0) {
                 val nal = buffer.copyOfRange(nalStart, next)
+                emitted(next)
                 compact(next)
+                readStart -= next
                 nalStart = 0
                 scan = startCodeLengthAt(0)
+                return nal
+            }
+
+            val audLen = completeAudLength()
+            if (audLen > 0) {
+                val nal = buffer.copyOfRange(nalStart, nalStart + audLen)
+                emitted(nalStart + audLen)
+                compact(nalStart + audLen)
+                readStart -= nalStart + audLen
+                // What follows is the next start code (or the start of one): look
+                // for it from the top, like at the start of a stream.
+                nalStart = -1
+                scan = 0
                 return nal
             }
 
@@ -1751,8 +1789,30 @@ private class AnnexBNalSplitter(private val input: InputStream) {
             eof = true
             return false
         }
+        if (stats.on) {
+            prevReadTime = readTime
+            readTime = android.os.SystemClock.elapsedRealtimeNanos()
+            readStart = size
+        }
         size += n
         return true
+    }
+
+    /**
+     * Length (start code included) of the current NAL if it is a complete AUD, else
+     * 0. An AUD's payload is one byte (3-bit picture type + stop bit + zeros), so
+     * once that byte is here the NAL is whole. The checks are tight (exact header
+     * bytes and the stop-bit pattern) so no other NAL type can be mistaken for one.
+     */
+    private fun completeAudLength(): Int {
+        if (nalStart < 0) return 0
+        val sc = startCodeLengthAt(nalStart)
+        val h = nalStart + sc
+        if (size > h + 1 && buffer[h] == 0x09.toByte() &&
+            (buffer[h + 1].toInt() and 0x1F) == 0x10) return sc + 2          // H.264
+        if (size > h + 2 && buffer[h] == 0x46.toByte() && buffer[h + 1] == 0x01.toByte() &&
+            (buffer[h + 2].toInt() and 0x1F) == 0x10) return sc + 3          // HEVC
+        return 0
     }
 
     private fun compact(from: Int) {
@@ -1784,5 +1844,35 @@ private class AnnexBNalSplitter(private val input: InputStream) {
             buffer[offset + 3] == 1.toByte()
         ) return 4
         return 3
+    }
+}
+
+/** Dev-only once-per-second log of NAL hold times; see AnnexBNalSplitter. */
+private class HoldStats private constructor(val on: Boolean) {
+    private var n = 0
+    private var held = 0
+    private var sumNs = 0L
+    private var sumHeldNs = 0L
+    private var maxNs = 0L
+    private var last = android.os.SystemClock.elapsedRealtime()
+
+    fun add(ns: Long) {
+        n++; sumNs += ns; if (ns > maxNs) maxNs = ns; if (ns > 1_000_000L) { held++; sumHeldNs += ns }
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - last >= 1000) {
+            Log.i(TAG, "HOLD[rx-splitter] nals=$n held>1ms=$held avg=${"%.2f".format(sumNs / 1e6 / n)}ms avgHeld=${"%.2f".format(if (held > 0) sumHeldNs / 1e6 / held else 0.0)}ms max=${"%.2f".format(maxNs / 1e6)}ms")
+            n = 0; held = 0; sumNs = 0; sumHeldNs = 0; maxNs = 0; last = now
+        }
+    }
+
+    companion object {
+        fun create(): HoldStats {
+            val on = try {
+                val c = Class.forName("android.os.SystemProperties")
+                c.getMethod("get", String::class.java, String::class.java)
+                    .invoke(null, "debug.extdisplay.hold", "0") == "1"
+            } catch (_: Throwable) { false }
+            return HoldStats(on)
+        }
     }
 }
