@@ -25,6 +25,7 @@
 #include <endpointvolume.h> // IAudioEndpointVolume (optional "mute PC while streaming")
 #include <mmreg.h>         // WAVE_FORMAT_* tags for the mix format
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -32,6 +33,7 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <random>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -56,6 +58,17 @@ constexpr ULONGLONG kProvenUptimeMs = 5000;
 constexpr uint32_t kUdpMagic = 0x45585544;  // 'EXUD'
 constexpr int kUdpPayloadMax = 1400;        // keep total datagram under ~1500 MTU
 constexpr int kUdpHeaderSize = 12;
+// Forward-error-correction parity packet (additive: a receiver that does not know
+// this magic ignores it). Same 12-byte header with the nalSeq of the NAL it protects,
+// fragIndex = parity group number, fragCount = the NAL's fragment count; payload =
+// [u16 group count K][u16 XOR of the member fragment lengths][XOR of the members'
+// payloads, zero padded]. Group g holds fragments g, g+K, g+2K, ... (interleaved, so
+// a burst of up to K consecutive lost datagrams hits K different groups).
+constexpr uint32_t kUdpParityMagic = 0x45585550;  // 'EXUP'
+constexpr int kUdpParityExtra = 4;
+// Data fragments per parity packet (0 = off). 4 costs ~25% more bandwidth and cut
+// lost NALs 5-25x at 1-5% simulated datagram loss (EXTDISPLAY_UDP_FEC overrides).
+constexpr int kUdpFecDefault = 4;
 
 std::atomic<bool> g_stop{false};
 std::atomic<HANDLE> g_child{nullptr};
@@ -1138,6 +1151,26 @@ bool envFlag(const char* name) {
 // the tablet" (no sender in the path) so the old behaviour can be measured.
 bool directTcpDev() { return envFlag("EXTDISPLAY_DIRECT_TCP"); }
 
+// Dev-only numeric environment variable (empty/absent = def).
+double envNum(const char* name, double def) {
+    char v[32] = {0};
+    if (GetEnvironmentVariableA(name, v, sizeof(v)) == 0 || v[0] == 0) return def;
+    return std::atof(v);
+}
+
+// Keyframe interval in frames. UDP alone may use a different interval from TCP
+// (a lost packet is repaired by the next keyframe); TCP is never affected.
+// 500 ms: with the receiver holding the last good frame after a loss, the freeze
+// lasts until the next keyframe, so halving the interval halves it.
+constexpr int kUdpGopMsDefault = 500;
+int gopFrames(const Options& options) {
+    if (!options.udp) return options.fps;
+    const double ms = envNum("EXTDISPLAY_UDP_GOP_MS", 0) > 0 ? envNum("EXTDISPLAY_UDP_GOP_MS", 0)
+                                                           : kUdpGopMsDefault;
+    return std::max(1, static_cast<int>(options.fps * ms / 1000.0 + 0.5));
+}
+
+
 std::string buildStreamCommand(const std::string& ffmpeg, const Options& options,
                                const DisplayInfo& display, const Attempt& attempt,
                                const std::string& host) {
@@ -1184,18 +1217,30 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
     cmd << quote(ffmpeg)
         // -stats emits a periodic "frame=.. fps=.. bitrate=.." line on stderr
         // (separate from the NAL stdout pipe) so the GUI can show live throughput.
-        << " -hide_banner -loglevel warning -stats -stats_period 1"
-        << " -init_hw_device d3d11va=dx:" << display.adapterIndex
-        << " -filter_hw_device dx"
-        << " -filter_complex " << quote(graph)
-        << " -an -c:v " << attempt.encoder;
+        << " -hide_banner -loglevel warning -stats -stats_period 1";
+    if (envFlag("EXTDISPLAY_TEST_SOURCE")) {
+        // Dev-only: a synthetic moving picture with a burned-in frame counter instead
+        // of desktop capture (works while the screen is locked; CPU-fed, so every
+        // encoder, NVENC included, takes it). Size: --width/--height, else the display.
+        const std::string tw = (scaled || display.width > 0) ? widthStr : "2960";
+        const std::string th = (scaled || display.height > 0) ? heightStr : "1848";
+        cmd << " -re -f lavfi -i "
+            << quote("testsrc2=size=" + tw + "x" + th + ":rate=" + std::to_string(options.fps) +
+                     ",drawtext=fontfile='C\\:/Windows/Fonts/consola.ttf':text='%{frame_num}':"
+                     "x=60:y=60:fontsize=140:fontcolor=white:box=1:boxcolor=black@0.6,format=nv12");
+    } else {
+        cmd << " -init_hw_device d3d11va=dx:" << display.adapterIndex
+            << " -filter_hw_device dx"
+            << " -filter_complex " << quote(graph);
+    }
+    cmd << " -an -c:v " << attempt.encoder;
 
     // Encoder-family rate control / low-latency tuning.
     if (attempt.encoder.rfind("h264_nvenc", 0) == 0 ||
         attempt.encoder.rfind("hevc_nvenc", 0) == 0) {
         cmd << " -preset p1 -tune ull -rc cbr"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
-            << " -zerolatency 1 -delay 0 -bf 0 -g " << options.fps;
+            << " -zerolatency 1 -delay 0 -bf 0 -g " << gopFrames(options);
         // NOTE: intra-refresh was tried for the UDP path but it removed the periodic
         // IDR keyframes the decoder needs to (re)sync on a lossy Wi-Fi link, causing
         // a permanent freeze. Periodic IDR (-g) recovers within ~1s, so keep it.
@@ -1204,22 +1249,22 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
                attempt.encoder.rfind("hevc_qsv", 0) == 0) {
         cmd << " -preset veryfast"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
-            << " -bf 0 -g " << options.fps << " -async_depth 1";
+            << " -bf 0 -g " << gopFrames(options) << " -async_depth 1";
         if (options.hdr) cmd << " -profile:v main10";
     } else if (attempt.encoder.rfind("h264_amf", 0) == 0 ||
                attempt.encoder.rfind("hevc_amf", 0) == 0) {
         cmd << " -usage ultralowlatency -rc cbr"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
-            << " -bf 0 -g " << options.fps;
+            << " -bf 0 -g " << gopFrames(options);
         if (options.hdr) cmd << " -profile_tier high -profile:v main10";
     } else if (attempt.encoder.rfind("h264_mf", 0) == 0) {
         // Media Foundation: CBR, force hardware, low-latency scenario.
         cmd << " -rate_control cbr -b:v " << bitrate << " -maxrate " << bitrate
-            << " -hw_encoding true -scenario display_remoting -g " << options.fps;
+            << " -hw_encoding true -scenario display_remoting -g " << gopFrames(options);
     } else {  // libx264 / libx265
         cmd << " -preset ultrafast -tune zerolatency"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
-            << " -bf 0 -g " << options.fps;
+            << " -bf 0 -g " << gopFrames(options);
         if (options.hdr) cmd << " -profile:v main10";
     }
 
@@ -2527,10 +2572,38 @@ void pumpAnnexB(HANDLE pipe, const char* tag, KeepGoing keepGoing, Emit emit) {
 
 // ------------------------------------------------------------- udp streaming
 
+// Dev-only datagram loss simulator (EXTDISPLAY_UDP_LOSS=<percent>, optional
+// EXTDISPLAY_UDP_BURST=<mean burst length in datagrams>, EXTDISPLAY_UDP_SEED).
+// Off (the normal case) it is one predictable branch per datagram.
+struct UdpLossSim {
+    bool on = false, bad = false;
+    double p = 0, pBG = 1, pGB = 0;
+    double burst = 1;
+    std::mt19937_64 rng;
+    void init() {
+        const double pct = envNum("EXTDISPLAY_UDP_LOSS", 0);
+        if (pct <= 0) return;
+        on = true;
+        p = std::min(pct, 95.0) / 100.0;
+        burst = std::max(1.0, envNum("EXTDISPLAY_UDP_BURST", 1));
+        pBG = 1.0 / burst;
+        pGB = p * pBG / (1.0 - p);  // stationary share of the "lossy" state = p
+        rng.seed(static_cast<uint64_t>(envNum("EXTDISPLAY_UDP_SEED", 12345)));
+    }
+    bool drop() {
+        if (!on) return false;
+        const double u = std::uniform_real_distribution<double>(0.0, 1.0)(rng);
+        if (burst <= 1.0) return u < p;
+        if (bad) { if (u < pBG) bad = false; }
+        else if (u < pGB) bad = true;
+        return bad;
+    }
+};
+
 // Runs one ffmpeg attempt that writes Annex-B to a pipe; the bytes are split
 // into NAL units and each NAL is fragmented onto UDP. Returns the ffmpeg
 // uptime in ms (so the ladder's fast-fail logic works exactly as for TCP).
-ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udpPort) {
+ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udpPort, bool hevc) {
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -2586,10 +2659,44 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
 
     uint32_t nalSeq = 0;
     std::vector<uint8_t> encBlob;
+
+    // Dev-only: datagram loss simulation and a once-a-second transmit report.
+    UdpLossSim loss;
+    loss.init();
+    const bool txStats = loss.on || envFlag("EXTDISPLAY_UDP_STATS");
+    // FEC group size (data fragments per parity packet); 0 = none.
+    const int fecN = static_cast<int>(envNum("EXTDISPLAY_UDP_FEC", kUdpFecDefault));
+    unsigned long long stData = 0, stParity = 0, stKey = 0, stDgrams = 0, stDropped = 0, stNals = 0;
+    double stLast = nowMs();
+
+    auto sendDatagram = [&](const unsigned char* pkt, size_t n) {
+        if (txStats) ++stDgrams;
+        if (loss.drop()) { if (txStats) ++stDropped; return; }
+        sendto(sock, reinterpret_cast<const char*>(pkt), static_cast<int>(n), 0,
+               reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+    };
+    auto putHeader = [](unsigned char* pkt, uint32_t magic, uint32_t seq, uint16_t idx, uint16_t cnt) {
+        auto b = [](uint32_t v) { return static_cast<unsigned char>(v & 0xFF); };
+        pkt[0] = b(magic >> 24); pkt[1] = b(magic >> 16); pkt[2] = b(magic >> 8); pkt[3] = b(magic);
+        pkt[4] = b(seq >> 24); pkt[5] = b(seq >> 16); pkt[6] = b(seq >> 8); pkt[7] = b(seq);
+        pkt[8] = b(idx >> 8); pkt[9] = b(idx); pkt[10] = b(cnt >> 8); pkt[11] = b(cnt);
+    };
+
     auto sendNal = [&](const unsigned char* nal, size_t len) {
         if (len == 0) return;
         const unsigned char* data = nal;
         size_t dlen = len;
+        // What the NAL is (read from the plaintext, before sealing).
+        bool keyish = false;
+        if (txStats) {
+            const int sc = annexBStartLen(nal, len);
+            if (sc > 0 && len > static_cast<size_t>(sc)) {
+                const int h = nal[sc];
+                const int ht = (h >> 1) & 0x3F;
+                keyish = hevc ? ((ht >= 16 && ht <= 21) || (ht >= 32 && ht <= 34))
+                              : ((h & 0x1F) == 5 || (h & 0x1F) == 7 || (h & 0x1F) == 8);
+            }
+        }
         if (vEnc) {
             uint8_t nonce[kGcmNonceLen];
             std::memcpy(nonce, vPrefix, 4);
@@ -2601,22 +2708,50 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
         }
         const uint16_t fragCount = static_cast<uint16_t>(
             (dlen + kUdpPayloadMax - 1) / kUdpPayloadMax);
-        unsigned char pkt[kUdpHeaderSize + kUdpPayloadMax];
+        unsigned char pkt[kUdpHeaderSize + kUdpParityExtra + kUdpPayloadMax];
         for (uint16_t f = 0; f < fragCount; ++f) {
             const size_t off = static_cast<size_t>(f) * kUdpPayloadMax;
             const size_t chunk = (dlen - off < static_cast<size_t>(kUdpPayloadMax))
                                      ? (dlen - off) : static_cast<size_t>(kUdpPayloadMax);
-            auto b = [](uint32_t v) { return static_cast<unsigned char>(v & 0xFF); };
-            pkt[0] = b(kUdpMagic >> 24); pkt[1] = b(kUdpMagic >> 16);
-            pkt[2] = b(kUdpMagic >> 8);  pkt[3] = b(kUdpMagic);
-            pkt[4] = b(nalSeq >> 24); pkt[5] = b(nalSeq >> 16);
-            pkt[6] = b(nalSeq >> 8);  pkt[7] = b(nalSeq);
-            pkt[8] = b(f >> 8);          pkt[9] = b(f);
-            pkt[10] = b(fragCount >> 8); pkt[11] = b(fragCount);
+            putHeader(pkt, kUdpMagic, nalSeq, f, fragCount);
             memcpy(pkt + kUdpHeaderSize, data + off, chunk);
-            sendto(sock, reinterpret_cast<char*>(pkt),
-                   static_cast<int>(kUdpHeaderSize + chunk), 0,
-                   reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+            sendDatagram(pkt, kUdpHeaderSize + chunk);
+            if (txStats) stData += kUdpHeaderSize + chunk;
+        }
+        const int n = fecN;
+        if (n > 0) {
+            const int K = (fragCount + n - 1) / n;
+            for (int g = 0; g < K; ++g) {
+                unsigned char* par = pkt + kUdpHeaderSize + kUdpParityExtra;
+                std::memset(par, 0, kUdpPayloadMax);
+                uint16_t xl = 0;
+                size_t plen = 0;
+                for (int f = g; f < fragCount; f += K) {
+                    const size_t off = static_cast<size_t>(f) * kUdpPayloadMax;
+                    const size_t chunk = (dlen - off < static_cast<size_t>(kUdpPayloadMax))
+                                             ? (dlen - off) : static_cast<size_t>(kUdpPayloadMax);
+                    for (size_t i = 0; i < chunk; ++i) par[i] ^= data[off + i];
+                    xl ^= static_cast<uint16_t>(chunk);
+                    plen = std::max(plen, chunk);
+                }
+                putHeader(pkt, kUdpParityMagic, nalSeq, static_cast<uint16_t>(g), fragCount);
+                pkt[12] = static_cast<unsigned char>(K >> 8); pkt[13] = static_cast<unsigned char>(K);
+                pkt[14] = static_cast<unsigned char>(xl >> 8); pkt[15] = static_cast<unsigned char>(xl);
+                sendDatagram(pkt, kUdpHeaderSize + kUdpParityExtra + plen);
+                if (txStats) stParity += kUdpHeaderSize + kUdpParityExtra + plen;
+            }
+        }
+        if (txStats) {
+            ++stNals;
+            if (keyish) stKey += dlen;
+            const double t = nowMs();
+            if (t - stLast >= 1000.0) {
+                std::cerr << "UDPTX nals=" << stNals << " dataKB=" << stData / 1024
+                          << " parityKB=" << stParity / 1024 << " keyKB=" << stKey / 1024
+                          << " dgrams=" << stDgrams << " dropped=" << stDropped << std::endl;
+                stData = stParity = stKey = stDgrams = stDropped = stNals = 0;
+                stLast = t;
+            }
         }
         ++nalSeq;
     };
@@ -2895,7 +3030,7 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
 
         ULONGLONG uptime = 0;
         if (options.udp) {
-            uptime = runUdpAttempt(cmd, host, options.port);
+            uptime = runUdpAttempt(cmd, host, options.port, options.hevc);
         } else if (relayTcp) {
             bool peerClosed = false;
             uptime = runEncryptedTcpAttempt(cmd, host, options.port, peerClosed,
