@@ -1,6 +1,6 @@
-# Extended Display
+# DualSlate
 
-Turn an Android tablet into a true **extended display** (not a mirror) for a Windows PC or Mac — at the tablet's **native resolution, 120 Hz, with HDR10**, over **USB or Wi-Fi**, with **touch and S Pen** control of the PC and optional **desktop audio**.
+**Extended Display for Android tablets.** Turn an Android tablet into a true **extended display** (not a mirror) for a Windows PC or Mac — at the tablet's **native resolution, 120 Hz, with HDR10**, over **USB or Wi-Fi**, with **touch and S Pen** control of the PC and optional **desktop audio**.
 
 Built and verified on a Samsung Galaxy Tab S9 Ultra (2960×1848) + Windows 11.
 
@@ -8,9 +8,9 @@ Built and verified on a Samsung Galaxy Tab S9 Ultra (2960×1848) + Windows 11.
 
 **📖 Full step-by-step guide: [INSTALL.md](INSTALL.md)** (new-device setup, manual driver steps, packaging, troubleshooting).
 
-Quick version — with the installer **`ExtendedDisplaySetup-<version>.exe`** from [Releases](https://github.com/Namans12/dual_display/releases) (or a portable folder you build yourself, see INSTALL.md):
+Quick version — with the installer **`DualSlateSetup-<version>.exe`** from [Releases](https://github.com/Namans12/dual_display/releases) (or a portable folder you build yourself, see INSTALL.md):
 
-1. **Install the virtual display driver once:** right-click **`Install-Driver.bat`** → Run as administrator, then **reboot once**. (Or run `ExtendedDisplaySetup.exe` with the driver option ticked.)
+1. **Install the virtual display driver once:** right-click **`Install-Driver.bat`** → Run as administrator, then **reboot once**. (Or run `DualSlateSetup.exe` with the driver option ticked.)
 2. On the tablet: enable Developer Options → USB debugging (USB path), or sideload `ExtendedDisplayReceiver.apk` (Wi-Fi path).
 3. Double-click **`ExtendedDisplay.exe`** — the settings GUI. Pick USB/Wi-Fi, codec, HDR, touch, then **Start Streaming**. **Stop** switches the virtual screen off again.
 

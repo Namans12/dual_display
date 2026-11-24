@@ -540,7 +540,7 @@ namespace ExtendedDisplay
             }
             exePath = ResolveSenderPath();
 
-            Text = "Extended Display";
+            Text = "DualSlate";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             AutoScaleMode = AutoScaleMode.None;
@@ -574,8 +574,8 @@ namespace ExtendedDisplay
 
         void BuildUi()
         {
-            lblTitle = Add(this, new Label { Text = "Extended Display", ForeColor = Ui.Text, BackColor = Ui.Bg, AutoSize = false }, 24, 16, 380, 32, 23f, Ui.Semi);
-            lblSub = Add(this, new Label { Text = "Use your tablet as an extra screen", ForeColor = Ui.Muted, BackColor = Ui.Bg, AutoSize = false }, 25, 48, 380, 20, Small);
+            lblTitle = Add(this, new Label { Text = "DualSlate", ForeColor = Ui.Text, BackColor = Ui.Bg, AutoSize = false }, 24, 16, 380, 32, 23f, Ui.Semi);
+            lblSub = Add(this, new Label { Text = "Extended Display - use your tablet as an extra screen", ForeColor = Ui.Muted, BackColor = Ui.Bg, AutoSize = false }, 25, 48, 380, 20, Small);
             pill = Add(this, new Pill { Text = "Starting up" }, 480, 22, 216, 30, 12.5f, Ui.Semi);
 
             // Left column: Connection + Quality.
@@ -826,21 +826,21 @@ namespace ExtendedDisplay
             {
                 SetState(AppState.Fault);
                 SetPill("Driver missing", Tone.Bad);
-                SetDetail("The virtual display driver isn't installed. Re-run the Extended Display installer (ExtendedDisplaySetup.exe) to repair it, then click Retry.");
+                SetDetail("The virtual display driver isn't installed. Re-run the DualSlate installer (DualSlateSetup.exe) to repair it, then click Retry.");
                 return;
             }
             if (r == Vdd.Result.Failed)
             {
                 SetState(AppState.Fault);
                 SetPill("Driver error", Tone.Bad);
-                SetDetail("Couldn't load the virtual display driver: " + detail + ". Re-run the Extended Display installer to repair it, then click Retry.");
+                SetDetail("Couldn't load the virtual display driver: " + detail + ". Re-run the DualSlate installer to repair it, then click Retry.");
                 return;
             }
             if (!noDriver && !File.Exists(exePath))
             {
                 SetState(AppState.Fault);
                 SetPill("Sender missing", Tone.Bad);
-                SetDetail("ExtendedDisplaySender.exe was not found at " + exePath + ". Re-run the Extended Display installer, then click Retry.");
+                SetDetail("ExtendedDisplaySender.exe was not found at " + exePath + ". Re-run the DualSlate installer, then click Retry.");
                 return;
             }
             SetState(AppState.Ready);
@@ -1356,7 +1356,7 @@ namespace ExtendedDisplay
             {
                 if (!created && !test)
                 {
-                    MessageBox.Show("Extended Display is already running.", "Extended Display", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show("DualSlate is already running.", "DualSlate", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
                 Application.EnableVisualStyles();

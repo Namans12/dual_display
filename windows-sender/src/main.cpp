@@ -2150,7 +2150,7 @@ std::optional<std::string> discoverTablet(int timeoutMs) {
     const ULONGLONG deadline = GetTickCount64() + timeoutMs;
 
     std::cout << "Searching for the tablet on the network "
-                 "(make sure the Extended Display app is open)...\n";
+                 "(make sure the DualSlate app is open on the tablet)...\n";
     while (!g_stop.load() && GetTickCount64() < deadline) {
         for (const sockaddr_in& dest : targets) {
             sendto(sock, query, sizeof(query) - 1, 0,
@@ -2187,10 +2187,10 @@ std::optional<std::string> discoverTablet(int timeoutMs) {
 
 void printUsage() {
     std::cout <<
-        "ExtendedDisplaySender — plug-and-play extended display over USB\n\n"
+        "ExtendedDisplaySender - plug-and-play extended display over USB\n\n"
         "Just run it with no arguments:\n"
         "  - switches the virtual screen on once a tablet is found (the driver must be\n"
-        "    loaded: start from the Extended Display app) and off again when done\n"
+        "    loaded: start from the DualSlate app) and off again when done\n"
         "  - waits for the tablet over USB, installs and launches the receiver app\n"
         "  - picks the best encoder for this machine and streams; reconnects automatically\n\n"
         "Options:\n"
@@ -2673,7 +2673,7 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
     }
     if (ladder.empty()) {
         std::cerr << "No usable H.264 encoder found. Your FFmpeg build may be "
-                     "broken — install the full GPL build (ffmpeg.org or gyan.dev).\n";
+                     "broken - install the full GPL build (ffmpeg.org or gyan.dev).\n";
         return 3;
     }
 
@@ -3031,7 +3031,7 @@ int main(int argc, char** argv) {
                 std::array<uint8_t, kKeyLen> k{};
                 if (deriveKey(keyEnv, k)) {
                     g_pairKey = k;
-                    std::cout << "Pairing enabled — encrypting the link (enter the code on the tablet).\n";
+                    std::cout << "Pairing enabled - encrypting the link (enter the code on the tablet).\n";
                 }
                 SecureZeroMemory(keyEnv, keyEnvLen);
             }
@@ -3090,7 +3090,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 if (!announced) {
-                    std::cout << "Waiting for a tablet — plug in USB, or open the app "
+                    std::cout << "Waiting for a tablet - plug in USB, or open the app "
                                  "on the same Wi-Fi...\n";
                     announced = true;
                 }
@@ -3129,7 +3129,7 @@ int main(int argc, char** argv) {
             const PrepResult prep = prepareVirtualDisplay(options, selected);
             if (prep == PrepResult::NoDriver) {
                 std::cerr << "The virtual display driver is not loaded. Start from the "
-                             "Extended Display app, which loads the driver and then runs "
+                             "DualSlate app, which loads the driver and then runs "
                              "this sender.\n";
                 return 2;
             }

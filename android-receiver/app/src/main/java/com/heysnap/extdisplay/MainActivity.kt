@@ -275,13 +275,21 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private fun buildIdleScreen(initialStatus: String): FrameLayout {
         val name = TextView(this).apply {
-            text = "Extended Display"
+            text = "DualSlate"
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 64f
             typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
             letterSpacing = 0.02f
             gravity = Gravity.CENTER
             setShadowLayer(dp(18).toFloat(), 0f, dp(2).toFloat(), 0x66100830)
+        }
+        val subtitle = TextView(this).apply {
+            text = "Extended Display"
+            setTextColor(0xCCFFFFFF.toInt())
+            textSize = 20f
+            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+            letterSpacing = 0.12f
+            gravity = Gravity.CENTER
         }
         val rule = View(this).apply {
             background = GradientDrawable().apply {
@@ -313,6 +321,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             val row = { LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
             addView(name, row())
+            addView(subtitle, row().apply { topMargin = dp(4) })
             addView(rule, LinearLayout.LayoutParams(dp(56), dp(2)).apply {
                 topMargin = dp(22); bottomMargin = dp(26)
             })
@@ -387,7 +396,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 if (CODE_ALPHABET.indexOf(c) >= 0) kept.append(c)
             }
             if (kept.length < end - start) {
-                setPairMessage("Codes use A–Z and 2–9, never I, O, 0 or 1.", 0xFFE0B050.toInt())
+                setPairMessage("Codes use A-Z and 2-9, never I, O, 0 or 1.", 0xFFE0B050.toInt())
                 pairShowsError = true
             }
             kept.toString()
@@ -559,7 +568,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         setPairMessage("Paired", 0xFF5FD68A.toInt())
         pairFieldBg.setStroke(dp(2), 0xFF5FD68A.toInt())
         pairInput.setTextColor(0xFF5FD68A.toInt())
-        showStatus("Paired — waiting for the picture")
+        showStatus("Paired - waiting for the picture")
         // Get out of the way; the host retries by itself and the picture follows.
         pairOverlay.postDelayed(dismissPairPrompt, 900)
     }
@@ -1067,7 +1076,7 @@ private class H264TcpReceiver(
                 // say so. (Only after a real connection, so a failed bind does not
                 // end a UDP session.)
                 if (accepted && endTcpStream() && running.get()) {
-                    onStatus("Disconnected — waiting for the computer")
+                    onStatus("Disconnected - waiting for the computer")
                 }
             }
         }

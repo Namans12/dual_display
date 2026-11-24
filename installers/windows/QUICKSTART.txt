@@ -1,8 +1,8 @@
-EXTENDED DISPLAY — Quick Start
+EXTENDED DISPLAY - Quick Start
 ==============================
 
 Turn a Samsung Galaxy Tab S9 Ultra (or any Android tablet) into a true extended
-second monitor for this Windows PC — native 2960x1848, 120 Hz, over USB-C or Wi-Fi,
+second monitor for this Windows PC - native 2960x1848, 120 Hz, over USB-C or Wi-Fi,
 with touch and S Pen controlling the PC.
 
 --------------------------------------------------------------------
@@ -45,7 +45,7 @@ RUN IT
      app is open on the tablet.
    - If you ticked Encrypt: type the shown code on the tablet; video +
      audio start once it's paired.
-4. Click  Stop  when done — the virtual screen switches off. (Close the
+4. Click  Stop  when done - the virtual screen switches off. (Close the
    window to unload the driver; while it is open, Windows Settings lists the
    screen as a disconnected display.)
 

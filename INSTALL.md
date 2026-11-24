@@ -1,4 +1,4 @@
-# Extended Display — Install, Run & Package Guide
+# DualSlate (Extended Display) - Install, Run & Package Guide
 
 Turn a Samsung Galaxy Tab S9 Ultra (or any Android tablet) into a **true extended
 second monitor** for a Windows PC — native **2960×1848 @ 120 Hz**, over **USB‑C or
@@ -14,7 +14,7 @@ This guide has three parts:
 
 ## What's in the package
 
-The installer (`ExtendedDisplaySetup-<version>.exe`, on GitHub Releases) contains everything — no
+The installer (`DualSlateSetup-<version>.exe`, on GitHub Releases) contains everything — no
 runtimes to install:
 
 | File | Purpose |
@@ -206,7 +206,7 @@ Then either:
 - **`.exe` installer** (needs [Inno Setup 6](https://jrsoftware.org/isdl.php)):
   ```powershell
   & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
-  # -> dist\ExtendedDisplaySetup.exe
+  # -> dist\DualSlateSetup.exe
   ```
   The installer bundles the payload, installs the VDD (optional task), and creates
   Start‑menu/desktop shortcuts to `ExtendedDisplay.exe`.
