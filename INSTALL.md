@@ -19,7 +19,7 @@ runtimes to install:
 
 | File | Purpose |
 |------|---------|
-| `ExtendedDisplay.exe` | **Settings GUI** — the app you run. Picks options, starts/stops streaming, keeps the virtual display driver loaded while it is open. |
+| `DualSlate.exe` | **Settings GUI** — the app you run. Picks options, starts/stops streaming, keeps the virtual display driver loaded while it is open. |
 | `ExtendedDisplaySender.exe` | The streaming engine (the GUI launches this; can also be run directly with flags). |
 | `ffmpeg.exe` | GPU capture + H.264/HEVC encode (full GPL build with `ddagrab`). |
 | `platform-tools\adb.exe` | Talks to the tablet over USB. |
@@ -56,7 +56,7 @@ into Windows. Everything else just runs.
 1. On the tablet: Settings → About → tap *Build number* 7× to enable Developer
    options, then Developer options → enable **USB debugging**.
 2. Plug the tablet into the PC with USB‑C and tap **Allow** on the debugging prompt.
-3. Just run `ExtendedDisplay.exe` and Start — the sender installs and launches the
+3. Just run `DualSlate.exe` and Start — the sender installs and launches the
    app automatically.
 
 **Wi‑Fi only (no USB debugging):**
@@ -66,7 +66,7 @@ into Windows. Everything else just runs.
 
 ### Step 3 — Run it
 
-1. Double‑click **`ExtendedDisplay.exe`** and approve the UAC prompt. The settings
+1. Double‑click **`DualSlate.exe`** and approve the UAC prompt. The settings
    window opens:
 
    - **Connection:** USB (default) or Wi‑Fi
@@ -180,7 +180,7 @@ cmake --build build --config Release
 
 ```powershell
 windows-sender\launcher\build.ps1
-# -> windows-sender\launcher\ExtendedDisplay.exe  (uses csc from .NET Framework)
+# -> windows-sender\launcher\DualSlate.exe  (uses csc from .NET Framework)
 ```
 
 ### Build the Android app
@@ -209,7 +209,7 @@ Then either:
   # -> dist\DualSlateSetup.exe
   ```
   The installer bundles the payload, installs the VDD (optional task), and creates
-  Start‑menu/desktop shortcuts to `ExtendedDisplay.exe`.
+  Start‑menu/desktop shortcuts to `DualSlate.exe`.
 
 ---
 

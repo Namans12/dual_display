@@ -41,14 +41,14 @@ if (-not (Test-Path $exe)) {
 Copy-Item $exe $payload -Force
 Write-Host "OK ExtendedDisplaySender.exe"
 
-# 1b. Settings GUI launcher (ExtendedDisplay.exe). Build it if missing.
-$gui = Join-Path $RepoRoot 'windows-sender\launcher\ExtendedDisplay.exe'
+# 1b. Settings GUI launcher (DualSlate.exe). Build it if missing.
+$gui = Join-Path $RepoRoot 'windows-sender\launcher\DualSlate.exe'
 if (-not (Test-Path $gui)) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'windows-sender\launcher\build.ps1') | Out-Null
 }
 if (-not (Test-Path $gui)) { throw "Launcher not built. Run windows-sender/launcher/build.ps1" }
 Copy-Item $gui $payload -Force
-Write-Host "OK ExtendedDisplay.exe (settings GUI)"
+Write-Host "OK DualSlate.exe (settings GUI)"
 
 # 2. Receiver APK (prefer release)
 $apkRelease = Join-Path $RepoRoot 'android-receiver\app\build\outputs\apk\release\app-release.apk'

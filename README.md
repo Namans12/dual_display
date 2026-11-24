@@ -12,7 +12,7 @@ Quick version — with the installer **`DualSlateSetup-<version>.exe`** from [Re
 
 1. **Install the virtual display driver once:** right-click **`Install-Driver.bat`** → Run as administrator, then **reboot once**. (Or run `DualSlateSetup.exe` with the driver option ticked.)
 2. On the tablet: enable Developer Options → USB debugging (USB path), or sideload `ExtendedDisplayReceiver.apk` (Wi-Fi path).
-3. Double-click **`ExtendedDisplay.exe`** — the settings GUI. Pick USB/Wi-Fi, codec, HDR, touch, then **Start Streaming**. **Stop** switches the virtual screen off again.
+3. Double-click **`DualSlate.exe`** — the settings GUI. Pick USB/Wi-Fi, codec, HDR, touch, then **Start Streaming**. **Stop** switches the virtual screen off again.
 
 The GUI just drives `ExtendedDisplaySender.exe`, which you can also run directly:
 
@@ -70,7 +70,7 @@ The virtual screen is **on only while streaming**: the driver stays loaded while
 ```text
 windows-sender/     C++ host: display discovery, VDD screen switching, USB/Wi-Fi
                     transport, encoder ladder, ffmpeg supervision, touch inject
-windows-sender/launcher/  C# WinForms settings GUI (ExtendedDisplay.exe)
+windows-sender/launcher/  C# WinForms settings GUI (DualSlate.exe)
 android-receiver/   Kotlin app: MediaCodec decode, TCP/UDP receive, touch uplink
 mac-host/           macOS host (ScreenCaptureKit + VideoToolbox)
 installers/windows/ Inno Setup installer + payload/VDD-install scripts

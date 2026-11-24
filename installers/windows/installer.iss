@@ -17,7 +17,7 @@ Compression=lzma2
 SolidCompression=yes
 DisableProgramGroupPage=yes
 SetupIconFile=..\..\windows-sender\launcher\app.ico
-UninstallDisplayIcon={app}\ExtendedDisplay.exe
+UninstallDisplayIcon={app}\DualSlate.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"
@@ -31,16 +31,18 @@ Source: "uninstall-vdd.ps1"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 ; Shortcuts point at the settings GUI (the recommended entry point). It manages
 ; the virtual display, HDR, and starts/stops streaming.
-Name: "{autoprograms}\DualSlate"; Filename: "{app}\ExtendedDisplay.exe"
-Name: "{autodesktop}\DualSlate"; Filename: "{app}\ExtendedDisplay.exe"; Tasks: desktopicon
+Name: "{autoprograms}\DualSlate"; Filename: "{app}\DualSlate.exe"
+Name: "{autodesktop}\DualSlate"; Filename: "{app}\DualSlate.exe"; Tasks: desktopicon
 
 [Run]
 ; Install the VirtualDrivers VDD. The app loads it while open and switches only its
 ; screen on while streaming, so there's no extra active display while idle.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-vdd.ps1"" -AppDir ""{app}"""; StatusMsg: "Installing the virtual display driver..."; Flags: runhidden waituntilterminated; Tasks: installvdd
-Filename: "{app}\ExtendedDisplay.exe"; Description: "Launch DualSlate now"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\DualSlate.exe"; Description: "Launch DualSlate now"; Flags: nowait postinstall skipifsilent
 
 [InstallDelete]
+; The launcher was ExtendedDisplay.exe before 0.11.1.
+Type: files; Name: "{app}\ExtendedDisplay.exe"
 ; Shortcuts left by releases named "Extended Display".
 Type: files; Name: "{autoprograms}\Extended Display.lnk"
 Type: files; Name: "{autodesktop}\Extended Display.lnk"
