@@ -278,7 +278,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             text = "DualSlate"
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 64f
-            typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+            // Medium weight: the light face was too thin to carry the app's name.
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             letterSpacing = 0.02f
             gravity = Gravity.CENTER
             setShadowLayer(dp(18).toFloat(), 0f, dp(2).toFloat(), 0x66100830)

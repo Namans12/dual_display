@@ -16,7 +16,8 @@ OutputDir=dist
 Compression=lzma2
 SolidCompression=yes
 DisableProgramGroupPage=yes
-UninstallDisplayIcon={app}\ExtendedDisplaySender.exe
+SetupIconFile=..\..\windows-sender\launcher\app.ico
+UninstallDisplayIcon={app}\ExtendedDisplay.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"
@@ -34,9 +35,8 @@ Name: "{autoprograms}\DualSlate"; Filename: "{app}\ExtendedDisplay.exe"
 Name: "{autodesktop}\DualSlate"; Filename: "{app}\ExtendedDisplay.exe"; Tasks: desktopicon
 
 [Run]
-; Install the VirtualDrivers VDD. The monitor stays INACTIVE until the sender
-; extends onto it on demand (CCD topology), so there's no phantom display while
-; idle and no elevation needed at run time.
+; Install the VirtualDrivers VDD. The app loads it while open and switches only its
+; screen on while streaming, so there's no extra active display while idle.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install-vdd.ps1"" -AppDir ""{app}"""; StatusMsg: "Installing the virtual display driver..."; Flags: runhidden waituntilterminated; Tasks: installvdd
 Filename: "{app}\ExtendedDisplay.exe"; Description: "Launch DualSlate now"; Flags: nowait postinstall skipifsilent
 

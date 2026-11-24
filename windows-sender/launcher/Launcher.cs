@@ -377,6 +377,20 @@ namespace ExtendedDisplay
         }
     }
 
+    // A label drawn without GDI's side padding, which grows with the font size: the
+    // large title otherwise started visibly right of the smaller subtitle and the
+    // section headings. With it, all of them start exactly at their x.
+    class TightLabel : Label
+    {
+        public bool Wraps;  // word-wrap instead of one ellipsised line
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, ForeColor, BackColor,
+                TextFormatFlags.NoPadding | TextFormatFlags.Left | TextFormatFlags.Top |
+                (Wraps ? TextFormatFlags.WordBreak : TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis));
+        }
+    }
+
     class InfoDot : Control
     {
         bool hot;
@@ -541,7 +555,10 @@ namespace ExtendedDisplay
             exePath = ResolveSenderPath();
 
             Text = "DualSlate";
-            FormBorderStyle = FormBorderStyle.FixedDialog;
+            // FixedSingle, not FixedDialog: a dialog frame shows no icon, which left
+            // the caption text jammed against the window's left edge.
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             MaximizeBox = false;
             AutoScaleMode = AutoScaleMode.None;
             StartPosition = FormStartPosition.Manual;
@@ -574,8 +591,9 @@ namespace ExtendedDisplay
 
         void BuildUi()
         {
-            lblTitle = Add(this, new Label { Text = "DualSlate", ForeColor = Ui.Text, BackColor = Ui.Bg, AutoSize = false }, 24, 16, 380, 32, 23f, Ui.Semi);
-            lblSub = Add(this, new Label { Text = "Extended Display - use your tablet as an extra screen", ForeColor = Ui.Muted, BackColor = Ui.Bg, AutoSize = false }, 25, 48, 380, 20, Small);
+            // Title, subtitle and section headings share one left edge (x 26).
+            lblTitle = Add(this, new TightLabel { Text = "DualSlate", ForeColor = Ui.Text, BackColor = Ui.Bg, AutoSize = false }, 26, 18, 380, 34, 23f, Ui.Semi);
+            lblSub = Add(this, new TightLabel { Text = "Extended Display - use your tablet as an extra screen", ForeColor = Ui.Muted, BackColor = Ui.Bg, AutoSize = false }, 26, 52, 380, 20, Small);
             pill = Add(this, new Pill { Text = "Starting up" }, 480, 22, 216, 30, 12.5f, Ui.Semi);
 
             // Left column: Connection + Quality.
@@ -613,9 +631,10 @@ namespace ExtendedDisplay
             chkAudio = Add(cardOpt, new FlatCheck { Text = "Desktop audio" }, 16, 104, 270, 24, Body);
             Info(cardOpt, 104, 296, "Play the PC's sound on the tablet over the same link (no extra driver needed).", chkAudio);
             chkMute = Add(cardOpt, new FlatCheck { Text = "Mute PC speakers", Enabled = false }, 41, 134, 245, 24, Body);
-            Info(cardOpt, 134, 296, "Sound plays only on the tablet; the PC's own speakers stay silent while streaming (restored when you Stop). Applied once sound plays; on PCs where muting also silences what is sent to the tablet, the speakers stay on and the status line says so.", chkMute);
+            Info(cardOpt, 134, 296, "Sound plays only on the tablet; the PC's own speakers stay silent while streaming, even if you press the volume keys, and go back to how you had them when you Stop. Needs Windows 10 version 2004 or newer.", chkMute);
             lblDelay = Add(cardOpt, new Label { Text = "A/V sync delay (ms)", BackColor = Ui.Card, ForeColor = Ui.Text, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft, Enabled = false }, 41, 164, 150, 24, Body);
-            numDelay = Add(cardOpt, new NumericUpDown { Minimum = 20, Maximum = 500, Value = 40, Increment = 5, Enabled = false, BorderStyle = BorderStyle.FixedSingle }, 196, 164, 90, 26, Body);
+            // Right edge at 286 like the IP box; vertically centred on its label in ApplyScale.
+            numDelay = Add(cardOpt, new NumericUpDown { Minimum = 20, Maximum = 500, Value = 40, Increment = 5, Enabled = false, BorderStyle = BorderStyle.FixedSingle, TextAlign = HorizontalAlignment.Center }, 210, 164, 76, 26, Body);
             Info(cardOpt, 164, 296, "Audio delay for lip-sync (ms). Higher = audio plays later; lower it if audio lags the video. ~40 matches the tablet's own video; ~20 for watching the laptop with the tablet as a speaker.", numDelay);
             chkAudio.CheckedChanged += (s, e) =>
             {
@@ -634,7 +653,7 @@ namespace ExtendedDisplay
             lnkNewCode.Click += OnNewCode;
             tip.SetToolTip(lnkNewCode, Wrap("Generate a fresh pairing code (rotates the key). Enter the new code on the tablet on the next Start."));
 
-            lblDetail = Add(this, new Label { Text = "", ForeColor = Ui.Muted, BackColor = Ui.Bg, AutoSize = false, TextAlign = ContentAlignment.TopLeft }, 24, 416, 672, 44, Body);
+            lblDetail = Add(this, new TightLabel { Text = "", Wraps = true, ForeColor = Ui.Muted, BackColor = Ui.Bg, AutoSize = false }, 26, 418, 670, 42, Body);
             btnMain = Add(this, new BigButton { Text = "Start" }, 24, 462, 672, 44, 16f, Ui.Semi);
             btnMain.Click += OnMainClick;
             AcceptButton = btnMain;
@@ -644,7 +663,7 @@ namespace ExtendedDisplay
 
         void Section(string text, int x, int y, int w)
         {
-            Add(this, new Label { Text = text, ForeColor = Ui.Muted, BackColor = Ui.Bg, AutoSize = false }, x + 2, y, w, 20, 12.5f, Ui.Semi);
+            Add(this, new TightLabel { Text = text, ForeColor = Ui.Muted, BackColor = Ui.Bg, AutoSize = false }, x + 2, y, w, 20, 12.5f, Ui.Semi);
         }
 
         // The i marker at the right edge of a row; the tooltip is also on the
@@ -685,6 +704,8 @@ namespace ExtendedDisplay
                 it.C.Bounds = new Rectangle(Ui.S(it.B.X), Ui.S(it.B.Y), Ui.S(it.B.Width), Ui.S(it.B.Height));
             }
             ResumeLayout(true);
+            // A NumericUpDown sizes its own height from the font; centre it on its label.
+            numDelay.Top = lblDelay.Top + (lblDelay.Height - numDelay.Height) / 2;
             LayoutPill();
             Invalidate(true);
         }
