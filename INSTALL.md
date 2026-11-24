@@ -1,4 +1,4 @@
-# Extended Display — Install, Run & Package Guide
+# DualSlate (Extended Display) - Install, Run & Package Guide
 
 Turn a Samsung Galaxy Tab S9 Ultra (or any Android tablet) into a **true extended
 second monitor** for a Windows PC — native **2960×1848 @ 120 Hz**, over **USB‑C or
@@ -14,12 +14,12 @@ This guide has three parts:
 
 ## What's in the package
 
-The distributable (`ExtendedDisplay-0.7.2-win64.zip`) contains everything — no
+The installer (`DualSlateSetup-<version>.exe`, on GitHub Releases) contains everything — no
 runtimes to install:
 
 | File | Purpose |
 |------|---------|
-| `ExtendedDisplay.exe` | **Settings GUI** — the app you run. Picks options, starts/stops streaming, manages the virtual display. |
+| `ExtendedDisplay.exe` | **Settings GUI** — the app you run. Picks options, starts/stops streaming, keeps the virtual display driver loaded while it is open. |
 | `ExtendedDisplaySender.exe` | The streaming engine (the GUI launches this; can also be run directly with flags). |
 | `ffmpeg.exe` | GPU capture + H.264/HEVC encode (full GPL build with `ddagrab`). |
 | `platform-tools\adb.exe` | Talks to the tablet over USB. |
@@ -77,8 +77,9 @@ into Windows. Everything else just runs.
    - *Wi‑Fi:* PC and tablet on the **same network**, app open on the tablet.
 3. Drag windows onto the tablet. **Touch works like a touchscreen** — tap = click,
    drag = move/scroll. Tap directly on windows/icons shown on the tablet.
-4. Click **Stop** when done — the virtual display disappears cleanly (no ghost
-   monitor).
+4. Click **Stop** when done — the virtual screen switches off (no ghost
+   monitor on your desktop). While the window is open, Windows Settings lists it as a
+   disconnected display; closing the launcher unloads the driver.
 
 ### Wired vs wireless — which to use
 
@@ -143,8 +144,9 @@ pnputil /add-driver ".\VDD\MttVDD.inf" /install
 Get-PnpDevice -FriendlyName '*Virtual Display Driver*' | Format-Table Status, FriendlyName
 ```
 
-Then **reboot once**. The monitor is created *inactive* — the sender extends onto
-it on demand, so there's no phantom display while idle.
+Then **reboot once**. The monitor is created *inactive* — the sender switches it on
+(by its own display path only) when a tablet is found and off again on Stop, so
+there's no phantom display on your desktop while idle.
 
 **To change the resolutions/refresh rates offered:** edit
 `C:\VirtualDisplayDriver\vdd_settings.xml` (first `<resolution>` is the default/
@@ -200,11 +202,11 @@ Then either:
 
 - **Portable ZIP** (no extra tools): stage `payload\*` plus `install-vdd.ps1`,
   `uninstall-vdd.ps1`, `Install-Driver.bat`, `QUICKSTART.txt` into a folder and zip
-  it. (This is what `dist\ExtendedDisplay-0.7.2-win64.zip` is.)
+  it, e.g. as `ExtendedDisplay-<version>-win64.zip`. (Releases ship only the installer.)
 - **`.exe` installer** (needs [Inno Setup 6](https://jrsoftware.org/isdl.php)):
   ```powershell
   & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
-  # -> dist\ExtendedDisplaySetup.exe
+  # -> dist\DualSlateSetup.exe
   ```
   The installer bundles the payload, installs the VDD (optional task), and creates
   Start‑menu/desktop shortcuts to `ExtendedDisplay.exe`.
@@ -215,10 +217,10 @@ Then either:
 
 | Symptom | Fix |
 |---------|-----|
-| "No extended display found" | VDD not installed or disabled → run `Install-Driver.bat`, reboot. Check `Get-PnpDevice -FriendlyName '*Virtual Display Driver*'`. |
+| "No extended display found" | VDD not installed → run `Install-Driver.bat`, reboot. Check `Get-PnpDevice -FriendlyName '*Virtual Display Driver*'`. |
 | Black bars on the tablet | Resolution mismatch. After the first driver install, **reboot** so 2960×1848 loads. |
 | Washed‑out / over‑bright video | The SDR path auto‑disables Windows HDR on the virtual display; if you launched with `--hdr` on an SDR desktop, drop `--hdr`. |
-| Touch does nothing | Use app **v8+** (bundled here). Tap directly on a window/icon shown on the tablet (touch ≠ mouse cursor). |
+| Touch does nothing | Use app **v10** (bundled here; the sender installs or upgrades it over USB). Tap directly on a window/icon shown on the tablet (touch ≠ mouse cursor). |
 | Wi‑Fi: tablet not found | PC + tablet on the **same** subnet; app open on the tablet; Wi‑Fi (not just USB) enabled on the tablet. |
 | Laggy over Wi‑Fi | Tick **Low‑latency UDP**; move to **5 GHz**; lower the bitrate (e.g. 15000). |
 | Encoder errors | Update GPU drivers; try `--encoder x264` (CPU) to isolate. |

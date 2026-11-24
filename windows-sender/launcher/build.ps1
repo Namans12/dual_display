@@ -6,6 +6,7 @@ $out = Join-Path $dir 'ExtendedDisplay.exe'
 
 & $csc /nologo /target:winexe /out:"$out" `
     /win32manifest:"$dir\app.manifest" `
+    /win32icon:"$dir\app.ico" `
     /reference:System.dll `
     /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll `

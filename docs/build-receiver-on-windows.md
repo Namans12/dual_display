@@ -11,8 +11,13 @@ this project. Anything marked **Unverified** may differ on your machine.
 ## What you are building
 
 Four changes to the receiver, all in `android-receiver/app/src/main/java/com/heysnap/extdisplay/MainActivity.kt`.
-`versionCode` goes from 9 to 10 (`android-receiver/app/build.gradle`); `versionName` stays `0.8.0`, so the app info
-screen will still say 0.8.0.
+`versionCode` goes from 9 to 10 (`android-receiver/app/build.gradle`); `versionName` is `0.11.0`.
+
+> **Status (2026-11-20): built and verified.** `gradlew.bat :app:assembleRelease` compiled the Mac-written source on
+> the first try (deprecation warnings only), `adb install -r` kept the app data, and the tablet reports
+> `versionCode=10`. Fix 4 had a bug found on the tablet: frames still in the decoder were presented after the
+> disconnect and lifted the cover again (fixed: frames from an ended connection are ignored). Everything in
+> section 5 was checked with the Windows host; see CHANGELOG v0.11.0 for what was and was not verified.
 
 1. **Decode loop.** The loop now waits at most 4 ms for the next piece of video and drains the decoder's output whenever
    it is idle, so a decoded frame is shown at once. Before, the newest frame sat undisplayed until the next piece of
@@ -35,7 +40,7 @@ screen will still say 0.8.0.
 
 The wire protocol is unchanged, so the v10 receiver works with the existing Windows host and with the Mac host.
 
-**None of these changes has ever been compiled or run.** The Mac they were written on has no JDK or Android SDK. This build is
+**(Historical, before 2026-11-20.)** None of these changes had been compiled or run. The Mac they were written on has no JDK or Android SDK. This build is
 their first compile. If it fails, the likeliest place is those edits. See [If the build fails](#if-the-build-fails).
 
 The exact diff, if you want to read it first:
@@ -325,7 +330,8 @@ can check is that nothing is worse and that the label behaviour is right.
 - A "Decoder reset: ..." message, if one ever appears while video is showing, is shown for 2.5 s and fades again. It
   does not hold the label up. Only a lost connection or never having had video does. (`showStatus` and `setShowing` in
   `MainActivity.kt`.)
-- If Encrypt is on and the tablet has no valid key, no video arrives, so the label simply stays. That is expected.
+- If Encrypt is on and the tablet has no valid key, it shows a centred prompt for the 8-character code (from v10 as
+  built on 2026-11-20); a plaintext session never shows it.
 
 ## 6. Put the APK into the installers
 
@@ -447,13 +453,12 @@ whole session.
 The APK on the tablet was signed with a different key. See [Signing](#3-signing): uninstall with
 `& $adb uninstall com.heysnap.extdisplay`, then install again.
 
-**After a reinstall, the tablet shows the pairing box again, or Encrypt streaming shows no video.**
-The uninstall deleted the saved pairing key. If you stream **with Encrypt**, type the host's pairing code into the box
-at the top of the tablet screen once. The tablet then remembers it again, and the host retries by itself
+**After a reinstall, the tablet asks for the pairing code again.**
+The uninstall deleted the saved pairing key. If you stream **with Encrypt**, type the host's pairing code into the prompt
+in the middle of the tablet screen once. The tablet then remembers it again, and the host retries by itself
 (`docs/mac.md`, troubleshooting). The code is shown in the host's window. It is stored in
 `%LOCALAPPDATA%\ExtendedDisplay\pairing.code` on Windows and in
-`~/Library/Application Support/ExtendedDisplay/pairing.code` on the Mac. If you stream **without Encrypt**, ignore the
-box. It tucks away by itself once video starts (`docs/mac.md`).
+`~/Library/Application Support/ExtendedDisplay/pairing.code` on the Mac. If you stream **without Encrypt**, no prompt appears.
 
 **The label does not fade.**
 First confirm `versionCode=10` on the tablet (section 4). Then check that the app was restarted after the install: run
