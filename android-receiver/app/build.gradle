@@ -3,6 +3,16 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Shared release key (docs/signing.md). Its passwords live OUTSIDE the repo in
+// ~/.dualslate/signing.properties (or the file named by DUALSLATE_SIGNING), so every
+// machine that has that folder builds APKs Android accepts as updates of each other.
+// Without it the build falls back to this machine's debug key, as before.
+def signingFile = file(System.getenv("DUALSLATE_SIGNING") ?:
+        "${System.getProperty('user.home')}/.dualslate/signing.properties")
+def signingProps = new Properties()
+if (signingFile.exists()) signingFile.withInputStream { signingProps.load(it) }
+def haveReleaseKey = signingFile.exists() && signingProps['storeFile']
+
 android {
     namespace = "com.heysnap.extdisplay"
     compileSdk = 35
@@ -24,12 +34,24 @@ android {
         jvmTarget = "17"
     }
 
+    signingConfigs {
+        release {
+            if (haveReleaseKey) {
+                // A relative storeFile is relative to the properties file's folder.
+                def store = new File(signingProps['storeFile'] as String)
+                storeFile store.isAbsolute() ? store : new File(signingFile.parentFile, store.path)
+                storePassword signingProps['storePassword']
+                keyAlias signingProps['keyAlias']
+                keyPassword signingProps['keyPassword'] ?: signingProps['storePassword']
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // PoC distribution: debug-signed so the installer-bundled APK
-            // installs without a release keystore.
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            // The shared release key when this machine has it, else the debug key.
+            signingConfig haveReleaseKey ? signingConfigs.release : signingConfigs.debug
         }
     }
 }

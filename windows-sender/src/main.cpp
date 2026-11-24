@@ -987,7 +987,15 @@ void adbEnsureAppInstalled(const std::string& adb, const std::string& exeDir) {
     std::cout << "Installing receiver app on the tablet...\n";
     const CaptureResult install = runCapture(quote(adb) + " install -r " + quote(apk));
     if (install.output.find("Success") == std::string::npos) {
-        std::cout << "APK install may have failed:\n" << install.output << "\n";
+        if (install.output.find("INSTALL_FAILED_UPDATE_INCOMPATIBLE") != std::string::npos) {
+            // Different signing key (docs/signing.md). Never uninstall automatically:
+            // that also deletes the tablet's saved pairing code.
+            std::cout << "The tablet app could not be updated: it was signed with a different key. "
+                         "Uninstall DualSlate on the tablet once, then press Start again "
+                         "(you will type the pairing code once more). See docs/signing.md.\n";
+        } else {
+            std::cout << "APK install may have failed:\n" << install.output << "\n";
+        }
     }
 }
 
