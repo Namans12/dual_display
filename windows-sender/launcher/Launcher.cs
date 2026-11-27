@@ -38,6 +38,7 @@ using System.Windows.Forms;
 // Shown by Explorer (file properties) and Task Manager.
 [assembly: AssemblyTitle("DualSlate")]
 [assembly: AssemblyProduct("DualSlate")]
+[assembly: AssemblyCompany("Namans12")]
 [assembly: AssemblyDescription("DualSlate - use an Android tablet as an extended display")]
 [assembly: AssemblyVersion("0.11.1.0")]
 [assembly: AssemblyFileVersion("0.11.1.0")]

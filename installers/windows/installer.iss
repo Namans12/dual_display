@@ -6,7 +6,8 @@ AppName=DualSlate
 ; Same AppId as the releases named "Extended Display", so this upgrades them in place.
 AppId=Extended Display
 AppVersion=0.11.0
-AppPublisher=HeySnap
+AppPublisher=Namans12
+AppPublisherURL=https://github.com/Namans12/dual_display
 ; New installs go to DualSlate; upgrades keep their existing folder (UsePreviousAppDir).
 DefaultDirName={autopf}\DualSlate
 PrivilegesRequired=admin
