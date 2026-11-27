@@ -19,7 +19,7 @@ ONE-TIME SETUP (per PC)
 INSTALL THE TABLET APP
 --------------------------------------------------------------------
 USB:   Plug the tablet in (USB-C), enable USB debugging on the tablet,
-       and just run ExtendedDisplay.exe -> it installs the app automatically.
+       and just run DualSlate.exe -> it installs the app automatically.
 
 Wi-Fi only (no USB debugging): copy ExtendedDisplayReceiver.apk to the tablet
        and tap it to install (allow "install from this source"). Open the app.
@@ -27,7 +27,7 @@ Wi-Fi only (no USB debugging): copy ExtendedDisplayReceiver.apk to the tablet
 --------------------------------------------------------------------
 RUN IT
 --------------------------------------------------------------------
-1. Double-click  ExtendedDisplay.exe   (approve the UAC prompt).
+1. Double-click  DualSlate.exe   (approve the UAC prompt).
 2. Pick your options:
       - Connection: USB (default) or Wi-Fi
       - Low-latency UDP: tick it for Wi-Fi if it feels laggy

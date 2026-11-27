@@ -41,14 +41,14 @@ if (-not (Test-Path $exe)) {
 Copy-Item $exe $payload -Force
 Write-Host "OK ExtendedDisplaySender.exe"
 
-# 1b. Settings GUI launcher (ExtendedDisplay.exe). Build it if missing.
-$gui = Join-Path $RepoRoot 'windows-sender\launcher\ExtendedDisplay.exe'
+# 1b. Settings GUI launcher (DualSlate.exe). Build it if missing.
+$gui = Join-Path $RepoRoot 'windows-sender\launcher\DualSlate.exe'
 if (-not (Test-Path $gui)) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'windows-sender\launcher\build.ps1') | Out-Null
 }
 if (-not (Test-Path $gui)) { throw "Launcher not built. Run windows-sender/launcher/build.ps1" }
 Copy-Item $gui $payload -Force
-Write-Host "OK ExtendedDisplay.exe (settings GUI)"
+Write-Host "OK DualSlate.exe (settings GUI)"
 
 # 2. Receiver APK (prefer release)
 $apkRelease = Join-Path $RepoRoot 'android-receiver\app\build\outputs\apk\release\app-release.apk'
@@ -105,9 +105,14 @@ if ($Force -or -not (Test-Path (Join-Path $vdd 'MttVDD.inf'))) {
     $dest = Join-Path $temp 'vdd'
     if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
     Expand-Archive $zip $dest
-    $driverDir = Get-ChildItem -Path $dest -Recurse -Directory |
-        Where-Object { Test-Path (Join-Path $_.FullName 'MttVDD.inf') } | Select-Object -First 1
-    if (-not $driverDir) { throw "MttVDD.inf not found inside the VDD archive" }
+    # The archive holds one driver per architecture (SignedDrivers\ARM64 and
+    # SignedDrivers\x86, where "x86" is really the x64 build). Taking the first folder
+    # shipped the ARM64 driver, which no x64 PC can install ("no compatible drivers").
+    # Pick the INF whose [Manufacturer] line declares NTamd64.
+    $driverDir = Get-ChildItem -Path $dest -Recurse -Filter 'MttVDD.inf' |
+        Where-Object { Select-String -Path $_.FullName -Pattern '^%ManufacturerName%=.*NTamd64' -Quiet } |
+        Select-Object -First 1 | ForEach-Object { $_.Directory }
+    if (-not $driverDir) { throw "No x64 (NTamd64) MttVDD.inf found inside the VDD archive" }
     $devcon = Get-ChildItem -Path $dest -Recurse -Filter 'devcon.exe' | Select-Object -First 1
     if (-not $devcon) { throw "devcon.exe not found inside the VDD archive" }
     New-Item -ItemType Directory -Force $vdd | Out-Null

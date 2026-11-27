@@ -10,9 +10,9 @@ Built and verified on a Samsung Galaxy Tab S9 Ultra (2960×1848) + Windows 11.
 
 Quick version — with the installer **`DualSlateSetup-<version>.exe`** from [Releases](https://github.com/Namans12/dual_display/releases) (or a portable folder you build yourself, see INSTALL.md):
 
-1. **Install the virtual display driver once:** right-click **`Install-Driver.bat`** → Run as administrator, then **reboot once**. (Or run `DualSlateSetup.exe` with the driver option ticked.)
-2. On the tablet: enable Developer Options → USB debugging (USB path), or sideload `ExtendedDisplayReceiver.apk` (Wi-Fi path).
-3. Double-click **`ExtendedDisplay.exe`** — the settings GUI. Pick USB/Wi-Fi, codec, HDR, touch, then **Start Streaming**. **Stop** switches the virtual screen off again.
+1. Run **`DualSlateSetup-<version>.exe`** with "Install the virtual display driver" ticked. If it asks for a restart, restart once: the driver finishes installing by itself.
+2. On the tablet: turn on Developer Options and USB debugging, then connect the USB-C cable. The PC installs or updates the tablet app for you. For Wi-Fi only, install `DualSlate-<version>.apk` from Releases instead.
+3. Open **DualSlate** (Start menu or desktop), approve the admin prompt, and press **Start**. **Stop** switches the extra screen off again.
 
 The GUI just drives `ExtendedDisplaySender.exe`, which you can also run directly:
 
@@ -36,7 +36,7 @@ What the Mac host does: a native extended display at 2960×1848 and a real 60 fp
 
 | | |
 |---|---|
-| **Display** | Clean single virtual monitor at native 2960×1848, **120 Hz**, **HDR10** — via the VirtualDrivers IddCx driver. No phantom monitors, no per-launch elevation. |
+| **Display** | Clean single virtual monitor at native 2960×1848, **120 Hz**, **HDR10** — via the VirtualDrivers IddCx driver. The screen exists only while streaming; your other monitors are never moved or changed. One admin prompt when you open the app (it loads the driver). |
 | **Codecs** | H.264 + **HEVC** (HDR uses HEVC Main10). Encoder auto-ladder: NVENC → Intel QSV → AMD AMF → **Media Foundation** → x264/x265, so it works on any GPU. |
 | **Transport** | **USB** (adb) and **Wi-Fi** with zero-config discovery. Video over reliable TCP or low-latency **UDP**; touch always on reliable TCP. |
 | **Input** | Multi-touch, two-finger scroll/pinch, long-press right-click, and **S Pen** with pressure / hover / eraser → injected as real Windows touch + pen. |
@@ -70,7 +70,7 @@ The virtual screen is **on only while streaming**: the driver stays loaded while
 ```text
 windows-sender/     C++ host: display discovery, VDD screen switching, USB/Wi-Fi
                     transport, encoder ladder, ffmpeg supervision, touch inject
-windows-sender/launcher/  C# WinForms settings GUI (ExtendedDisplay.exe)
+windows-sender/launcher/  C# WinForms settings GUI (DualSlate.exe)
 android-receiver/   Kotlin app: MediaCodec decode, TCP/UDP receive, touch uplink
 mac-host/           macOS host (ScreenCaptureKit + VideoToolbox)
 installers/windows/ Inno Setup installer + payload/VDD-install scripts
@@ -97,8 +97,13 @@ See [docs/build.md](docs/build.md) for building each component and the full CLI,
 ## Roadmap (not yet built)
 
 - QR-scan pairing (today you type the 8-char code; the encryption itself shipped in v0.8.0 — see [SECURITY.md](SECURITY.md)).
-- UDP loss resilience: FEC + on-demand keyframes + RTT-adaptive bitrate (needs a receiver→sender feedback channel; deliberately deferred — see [Fixes.md](Fixes.md)).
+- UDP: keyframes on demand and RTT-adaptive bitrate (need a receiver-to-sender feedback channel and a library encoder). Parity (FEC) and hold-last-frame recovery already ship.
+- More ideas with designs: [FUTURE_FEATURES.md](FUTURE_FEATURES.md) (auto-start with a tray icon, portrait).
 - Mac: true pinch/multi-touch and HDR (macOS platform limits); notarized Developer ID signing (today the app is self-signed).
+
+## License and credits
+
+DualSlate stands on other open-source work: the [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) by VirtualDrivers (MIT), [FFmpeg](https://ffmpeg.org) (GPL build by [BtbN](https://github.com/BtbN/FFmpeg-Builds)) and Android's adb. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for their licenses and sources.
 
 ## Related Repositories
 

@@ -25,6 +25,7 @@
 #include <endpointvolume.h> // IAudioEndpointVolume (optional "mute PC while streaming")
 #include <mmreg.h>         // WAVE_FORMAT_* tags for the mix format
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -32,6 +33,7 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <random>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -56,6 +58,17 @@ constexpr ULONGLONG kProvenUptimeMs = 5000;
 constexpr uint32_t kUdpMagic = 0x45585544;  // 'EXUD'
 constexpr int kUdpPayloadMax = 1400;        // keep total datagram under ~1500 MTU
 constexpr int kUdpHeaderSize = 12;
+// Forward-error-correction parity packet (additive: a receiver that does not know
+// this magic ignores it). Same 12-byte header with the nalSeq of the NAL it protects,
+// fragIndex = parity group number, fragCount = the NAL's fragment count; payload =
+// [u16 group count K][u16 XOR of the member fragment lengths][XOR of the members'
+// payloads, zero padded]. Group g holds fragments g, g+K, g+2K, ... (interleaved, so
+// a burst of up to K consecutive lost datagrams hits K different groups).
+constexpr uint32_t kUdpParityMagic = 0x45585550;  // 'EXUP'
+constexpr int kUdpParityExtra = 4;
+// Data fragments per parity packet (0 = off). 4 costs ~25% more bandwidth and cut
+// lost NALs 5-25x at 1-5% simulated datagram loss (EXTDISPLAY_UDP_FEC overrides).
+constexpr int kUdpFecDefault = 4;
 
 std::atomic<bool> g_stop{false};
 std::atomic<HANDLE> g_child{nullptr};
@@ -987,7 +1000,15 @@ void adbEnsureAppInstalled(const std::string& adb, const std::string& exeDir) {
     std::cout << "Installing receiver app on the tablet...\n";
     const CaptureResult install = runCapture(quote(adb) + " install -r " + quote(apk));
     if (install.output.find("Success") == std::string::npos) {
-        std::cout << "APK install may have failed:\n" << install.output << "\n";
+        if (install.output.find("INSTALL_FAILED_UPDATE_INCOMPATIBLE") != std::string::npos) {
+            // Different signing key (docs/signing.md). Never uninstall automatically:
+            // that also deletes the tablet's saved pairing code.
+            std::cout << "The tablet app could not be updated: it was signed with a different key. "
+                         "Uninstall DualSlate on the tablet once, then press Start again "
+                         "(you will type the pairing code once more). See docs/signing.md.\n";
+        } else {
+            std::cout << "APK install may have failed:\n" << install.output << "\n";
+        }
     }
 }
 
@@ -1120,6 +1141,36 @@ std::vector<Attempt> buildLadder(const std::string& ffmpeg, const Options& optio
     return ladder;
 }
 
+// Dev-only switches are environment variables set to 1 (see envFlag users).
+bool envFlag(const char* name) {
+    char v[8] = {0};
+    return GetEnvironmentVariableA(name, v, sizeof(v)) > 0 && v[0] == '1';
+}
+
+// Dev-only: EXTDISPLAY_DIRECT_TCP=1 restores plaintext "ffmpeg writes straight to
+// the tablet" (no sender in the path) so the old behaviour can be measured.
+bool directTcpDev() { return envFlag("EXTDISPLAY_DIRECT_TCP"); }
+
+// Dev-only numeric environment variable (empty/absent = def).
+double envNum(const char* name, double def) {
+    char v[32] = {0};
+    if (GetEnvironmentVariableA(name, v, sizeof(v)) == 0 || v[0] == 0) return def;
+    return std::atof(v);
+}
+
+// Keyframe interval in frames. UDP alone may use a different interval from TCP
+// (a lost packet is repaired by the next keyframe); TCP is never affected.
+// 500 ms: with the receiver holding the last good frame after a loss, the freeze
+// lasts until the next keyframe, so halving the interval halves it.
+constexpr int kUdpGopMsDefault = 500;
+int gopFrames(const Options& options) {
+    if (!options.udp) return options.fps;
+    const double ms = envNum("EXTDISPLAY_UDP_GOP_MS", 0) > 0 ? envNum("EXTDISPLAY_UDP_GOP_MS", 0)
+                                                           : kUdpGopMsDefault;
+    return std::max(1, static_cast<int>(options.fps * ms / 1000.0 + 0.5));
+}
+
+
 std::string buildStreamCommand(const std::string& ffmpeg, const Options& options,
                                const DisplayInfo& display, const Attempt& attempt,
                                const std::string& host) {
@@ -1166,18 +1217,30 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
     cmd << quote(ffmpeg)
         // -stats emits a periodic "frame=.. fps=.. bitrate=.." line on stderr
         // (separate from the NAL stdout pipe) so the GUI can show live throughput.
-        << " -hide_banner -loglevel warning -stats -stats_period 1"
-        << " -init_hw_device d3d11va=dx:" << display.adapterIndex
-        << " -filter_hw_device dx"
-        << " -filter_complex " << quote(graph)
-        << " -an -c:v " << attempt.encoder;
+        << " -hide_banner -loglevel warning -stats -stats_period 1";
+    if (envFlag("EXTDISPLAY_TEST_SOURCE")) {
+        // Dev-only: a synthetic moving picture with a burned-in frame counter instead
+        // of desktop capture (works while the screen is locked; CPU-fed, so every
+        // encoder, NVENC included, takes it). Size: --width/--height, else the display.
+        const std::string tw = (scaled || display.width > 0) ? widthStr : "2960";
+        const std::string th = (scaled || display.height > 0) ? heightStr : "1848";
+        cmd << " -re -f lavfi -i "
+            << quote("testsrc2=size=" + tw + "x" + th + ":rate=" + std::to_string(options.fps) +
+                     ",drawtext=fontfile='C\\:/Windows/Fonts/consola.ttf':text='%{frame_num}':"
+                     "x=60:y=60:fontsize=140:fontcolor=white:box=1:boxcolor=black@0.6,format=nv12");
+    } else {
+        cmd << " -init_hw_device d3d11va=dx:" << display.adapterIndex
+            << " -filter_hw_device dx"
+            << " -filter_complex " << quote(graph);
+    }
+    cmd << " -an -c:v " << attempt.encoder;
 
     // Encoder-family rate control / low-latency tuning.
     if (attempt.encoder.rfind("h264_nvenc", 0) == 0 ||
         attempt.encoder.rfind("hevc_nvenc", 0) == 0) {
         cmd << " -preset p1 -tune ull -rc cbr"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
-            << " -zerolatency 1 -delay 0 -bf 0 -g " << options.fps;
+            << " -zerolatency 1 -delay 0 -bf 0 -g " << gopFrames(options);
         // NOTE: intra-refresh was tried for the UDP path but it removed the periodic
         // IDR keyframes the decoder needs to (re)sync on a lossy Wi-Fi link, causing
         // a permanent freeze. Periodic IDR (-g) recovers within ~1s, so keep it.
@@ -1186,22 +1249,22 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
                attempt.encoder.rfind("hevc_qsv", 0) == 0) {
         cmd << " -preset veryfast"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
-            << " -bf 0 -g " << options.fps << " -async_depth 1";
+            << " -bf 0 -g " << gopFrames(options) << " -async_depth 1";
         if (options.hdr) cmd << " -profile:v main10";
     } else if (attempt.encoder.rfind("h264_amf", 0) == 0 ||
                attempt.encoder.rfind("hevc_amf", 0) == 0) {
         cmd << " -usage ultralowlatency -rc cbr"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
-            << " -bf 0 -g " << options.fps;
+            << " -bf 0 -g " << gopFrames(options);
         if (options.hdr) cmd << " -profile_tier high -profile:v main10";
     } else if (attempt.encoder.rfind("h264_mf", 0) == 0) {
         // Media Foundation: CBR, force hardware, low-latency scenario.
         cmd << " -rate_control cbr -b:v " << bitrate << " -maxrate " << bitrate
-            << " -hw_encoding true -scenario display_remoting -g " << options.fps;
+            << " -hw_encoding true -scenario display_remoting -g " << gopFrames(options);
     } else {  // libx264 / libx265
         cmd << " -preset ultrafast -tune zerolatency"
             << " -b:v " << bitrate << " -maxrate " << bitrate << " -bufsize " << bitrate
-            << " -bf 0 -g " << options.fps;
+            << " -bf 0 -g " << gopFrames(options);
         if (options.hdr) cmd << " -profile:v main10";
     }
 
@@ -1217,8 +1280,19 @@ std::string buildStreamCommand(const std::string& ffmpeg, const Options& options
     // Route through the sender (Annex-B on stdout) for UDP, and also for encrypted
     // TCP where the sender AES-GCMs each NAL before sending. Plain TCP lets ffmpeg
     // connect to the tablet's listener directly.
-    if (options.udp || g_pairKey) {
-        cmd << " -f " << (isHevc ? "hevc" : "h264") << " pipe:1";
+    if (options.udp || g_pairKey || !directTcpDev()) {
+        // AVI wraps every packet in a size-prefixed chunk, so the sender knows
+        // exactly where each frame ends (see pumpAnnexB). -avioflags direct: the
+        // muxer does not hold packets back. Dev switch: EXTDISPLAY_LEGACY_SPLIT=1
+        // asks for the raw stream again (to measure the old behaviour).
+        if (envFlag("EXTDISPLAY_LEGACY_SPLIT")) {
+            cmd << " -f " << (isHevc ? "hevc" : "h264") << " pipe:1";
+        } else {
+            // AVI is a variable-frame-rate format, which would turn ffmpeg's
+            // default (constant rate, repeating the last frame on a still screen)
+            // into "only when something changes"; keep the constant rate.
+            cmd << " -fps_mode cfr -avioflags direct -f avi pipe:1";
+        }
     } else {
         cmd << " -f " << (isHevc ? "hevc" : "h264")
             << " tcp://" << host << ":" << options.port;
@@ -2313,12 +2387,240 @@ Options parseArgs(int argc, char** argv) {
     return options;
 }
 
+// ------------------------------------------------- frame-exact ffmpeg output
+//
+// Raw Annex-B has no frame boundaries: a NAL ends where the next start code
+// begins, so the last NAL of every frame (the picture slice) used to sit in the
+// sender until the NEXT frame arrived, one frame interval (16.7 ms at 60 fps) later.
+// Pipe reads cannot fix that: ffmpeg writes a large packet in 32 KB pieces, so a
+// read boundary is not a packet boundary (measured; cutting there sent partial NALs).
+//
+// So the relay paths ask ffmpeg for AVI instead (-f avi): the muxer passes each
+// packet through untouched, in-band parameter sets included, but wraps it in a
+// '00dc' chunk whose header carries the exact size. A frame is therefore known to
+// be complete the moment its last byte arrives, whatever the pipe's read sizes.
+// With -avioflags direct the muxer does not buffer, so nothing waits for the next
+// packet (verified with a 2 fps source: each frame arrived when produced).
+//
+// If the stream is not AVI (the dev switch EXTDISPLAY_LEGACY_SPLIT=1, or an ffmpeg
+// that ignored -f avi) the pump falls back to start-code framing, as before.
+
+bool createVideoPipe(HANDLE& readEnd, HANDLE& writeEnd) {
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&readEnd, &writeEnd, &sa, 1 << 20)) return false;
+    SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
+    return true;
+}
+
+double nowMs() {
+    static const double freq = [] {
+        LARGE_INTEGER f; QueryPerformanceFrequency(&f); return static_cast<double>(f.QuadPart);
+    }();
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart) * 1000.0 / freq;
+}
+
+// Dev-only (EXTDISPLAY_HOLD_STATS=1): once a second, how long NALs were held
+// between their last byte arriving from ffmpeg and being handed to the network.
+struct HoldStats {
+    bool on = false;
+    const char* tag = "";
+    unsigned n = 0, held = 0;
+    double sum = 0, sumHeld = 0, max = 0, lastPrint = 0;
+    void init(const char* t) { tag = t; on = envFlag("EXTDISPLAY_HOLD_STATS"); lastPrint = nowMs(); }
+    void add(double ms) {
+        if (!on) return;
+        ++n; sum += ms; if (ms > max) max = ms; if (ms > 1.0) { ++held; sumHeld += ms; }
+        const double t = nowMs();
+        if (t - lastPrint >= 1000.0) {
+            std::cerr << "HOLD[" << tag << "] nals=" << n << " held>1ms=" << held
+                      << " avg=" << (n ? sum / n : 0.0) << "ms avgHeld=" << (held ? sumHeld / held : 0.0)
+                      << "ms max=" << max << "ms" << std::endl;
+            n = held = 0; sum = sumHeld = max = 0; lastPrint = t;
+        }
+    }
+};
+
+// Annex-B access-unit delimiters (a complete NAL each): H.264 type 9, HEVC type 35.
+// Appended right after a complete frame they are the NEXT access unit's delimiter,
+// so the stream stays valid, and they tell a receiver that reads a byte stream
+// that the frame's last NAL has ended (it sees a start code right away).
+const unsigned char kAudH264[] = {0, 0, 0, 1, 0x09, 0xF0};
+const unsigned char kAudHevc[] = {0, 0, 0, 1, 0x46, 0x01, 0x50};
+
+int annexBStartLen(const unsigned char* p, size_t avail) {
+    if (avail >= 3 && p[0] == 0 && p[1] == 0 && p[2] == 1) return 3;
+    if (avail >= 4 && p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 1) return 4;
+    return 0;
+}
+
+size_t annexBNextStart(const unsigned char* b, size_t size, size_t from) {
+    for (size_t i = from; i + 3 <= size; ++i) {
+        if (b[i] == 0 && b[i + 1] == 0 &&
+            (b[i + 2] == 1 || (b[i + 2] == 0 && i + 3 < size && b[i + 3] == 1))) {
+            return i;
+        }
+    }
+    return std::string::npos;
+}
+
+// Reads ffmpeg's stdout until it ends (or keepGoing() turns false) and calls
+//   emit(nal, len, flush, frameEnd)
+// for every NAL (start code included). flush is true on the last NAL of a batch
+// that may be written out; frameEnd is true only when that NAL is PROVEN to end a
+// frame (AVI chunk boundary), i.e. an AUD may follow it.
+// Returns true when it gave up on a corrupt stream (ffmpeg is then still running and
+// the pipe still open: the caller must stop it). aviMode is set once the stream is
+// known to be AVI, i.e. frame ends are proven and a frame-end AUD can be added.
+template <class KeepGoing, class Emit>
+bool pumpAnnexB(HANDLE pipe, const char* tag, KeepGoing keepGoing, Emit emit, bool& aviMode) {
+    aviMode = false;
+    constexpr size_t kMaxChunk = 64u << 20;  // a frame this big means a corrupt stream
+    HoldStats stats;
+    stats.init(tag);
+    std::vector<unsigned char> chunk(1 << 18), buf;
+    buf.reserve(1 << 20);
+    enum { kDetect, kAviTop, kAviMovi, kRaw } mode = kDetect;
+    size_t pos = 0;                                  // consumed up to here
+    size_t rawBase = std::string::npos;              // raw mode: start of the current NAL
+    double tRead = nowMs(), tPrevRead = tRead;       // when the latest / previous read returned
+    long long readStart = 0;                         // buf index where the latest read begins
+    bool bad = false;
+    DWORD got = 0;
+    while (!bad && keepGoing() &&
+           ReadFile(pipe, chunk.data(), static_cast<DWORD>(chunk.size()), &got, nullptr) && got > 0) {
+        tPrevRead = tRead;
+        tRead = nowMs();
+        readStart = static_cast<long long>(buf.size());
+        buf.insert(buf.end(), chunk.data(), chunk.data() + got);
+
+        for (;;) {
+            const size_t avail = buf.size() - pos;
+            const unsigned char* p = buf.data() + pos;
+            if (mode == kDetect) {
+                if (avail < 12) break;
+                if (std::memcmp(p, "RIFF", 4) == 0 && std::memcmp(p + 8, "AVI ", 4) == 0) {
+                    pos += 12;
+                    mode = kAviTop;
+                    aviMode = true;
+                } else {
+                    mode = kRaw;
+                }
+                continue;
+            }
+            if (mode == kAviTop) {
+                // Skip the header lists; frames start after "LIST <size> movi". (The
+                // sizes in a streamed header are not relied on, so search for it.)
+                size_t found = std::string::npos;
+                for (size_t i = 0; i + 12 <= avail; ++i) {
+                    if (std::memcmp(p + i, "LIST", 4) == 0 && std::memcmp(p + i + 8, "movi", 4) == 0) {
+                        found = i;
+                        break;
+                    }
+                }
+                if (found == std::string::npos) {
+                    if (avail > (1u << 20)) bad = true;  // no movi list: not the AVI we asked for
+                    break;
+                }
+                pos += found + 12;
+                mode = kAviMovi;
+                continue;
+            }
+            if (mode == kAviMovi) {
+                if (avail < 8) break;
+                // ffmpeg does not split a non-seekable (pipe) AVI into OpenDML "AVIX"
+                // RIFFs (measured: 1.3 GB, none), but a build that does would start
+                // "RIFF <size> AVIX" + "LIST <size> movi": step into those containers
+                // (12-byte headers) instead of reading them as a leaf chunk.
+                if (avail >= 12 && (std::memcmp(p, "RIFF", 4) == 0 ||
+                                    (std::memcmp(p, "LIST", 4) == 0 && std::memcmp(p + 8, "movi", 4) == 0))) {
+                    pos += 12;
+                    continue;
+                }
+                const size_t sz = static_cast<size_t>(p[4]) | (static_cast<size_t>(p[5]) << 8) |
+                                  (static_cast<size_t>(p[6]) << 16) | (static_cast<size_t>(p[7]) << 24);
+                if (sz > kMaxChunk) { bad = true; break; }
+                const size_t total = 8 + sz + (sz & 1);
+                if (avail < total) break;  // the rest of this frame is still on its way
+                if (p[2] == 'd' && (p[3] == 'c' || p[3] == 'b') && sz > 0) {
+                    const unsigned char* f = p + 8;
+                    // Start at the first start code: leading zero bytes before it are
+                    // not a NAL (a chunk with no start code at all is skipped).
+                    size_t base = annexBNextStart(f, sz, 0);
+                    while (base != std::string::npos) {
+                        const size_t next = annexBNextStart(f, sz, base + annexBStartLen(f + base, sz - base));
+                        const size_t end = next == std::string::npos ? sz : next;
+                        const bool last = next == std::string::npos;
+                        emit(f + base, end - base, last, last);
+                        stats.add(nowMs() - tRead);
+                        if (last) break;
+                        base = next;
+                    }
+                }
+                pos += total;
+                continue;
+            }
+            // kRaw: a NAL is complete only when the next start code arrives.
+            if (rawBase == std::string::npos) {
+                rawBase = annexBNextStart(buf.data(), buf.size(), pos);
+                if (rawBase == std::string::npos) break;
+            }
+            const size_t next = annexBNextStart(
+                buf.data(), buf.size(),
+                rawBase + annexBStartLen(buf.data() + rawBase, buf.size() - rawBase));
+            if (next == std::string::npos) break;
+            emit(buf.data() + rawBase, next - rawBase, true, false);
+            // Its last byte came in with this read, or waited since the one before.
+            stats.add(static_cast<long long>(next) - 1 >= readStart ? 0.0 : tRead - tPrevRead);
+            rawBase = next;
+            pos = next;
+        }
+
+        if (pos > 0) {
+            buf.erase(buf.begin(), buf.begin() + pos);
+            if (rawBase != std::string::npos) rawBase -= pos;
+            pos = 0;
+        }
+    }
+    return bad;
+}
+
 // ------------------------------------------------------------- udp streaming
+
+// Dev-only datagram loss simulator (EXTDISPLAY_UDP_LOSS=<percent>, optional
+// EXTDISPLAY_UDP_BURST=<mean burst length in datagrams>, EXTDISPLAY_UDP_SEED).
+// Off (the normal case) it is one predictable branch per datagram.
+struct UdpLossSim {
+    bool on = false, bad = false;
+    double p = 0, pBG = 1, pGB = 0;
+    double burst = 1;
+    std::mt19937_64 rng;
+    void init() {
+        const double pct = envNum("EXTDISPLAY_UDP_LOSS", 0);
+        if (pct <= 0) return;
+        on = true;
+        p = std::min(pct, 95.0) / 100.0;
+        burst = std::max(1.0, envNum("EXTDISPLAY_UDP_BURST", 1));
+        pBG = 1.0 / burst;
+        pGB = p * pBG / (1.0 - p);  // stationary share of the "lossy" state = p
+        rng.seed(static_cast<uint64_t>(envNum("EXTDISPLAY_UDP_SEED", 12345)));
+    }
+    bool drop() {
+        if (!on) return false;
+        const double u = std::uniform_real_distribution<double>(0.0, 1.0)(rng);
+        if (burst <= 1.0) return u < p;
+        if (bad) { if (u < pBG) bad = false; }
+        else if (u < pGB) bad = true;
+        return bad;
+    }
+};
 
 // Runs one ffmpeg attempt that writes Annex-B to a pipe; the bytes are split
 // into NAL units and each NAL is fragmented onto UDP. Returns the ffmpeg
 // uptime in ms (so the ladder's fast-fail logic works exactly as for TCP).
-ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udpPort) {
+ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udpPort, bool hevc) {
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -2332,16 +2634,12 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
     dest.sin_port = htons(static_cast<u_short>(udpPort));
     inet_pton(AF_INET, host.c_str(), &dest.sin_addr);
 
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
     HANDLE readPipe = nullptr, writePipe = nullptr;
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 1 << 20)) {
+    if (!createVideoPipe(readPipe, writePipe)) {
         closesocket(sock);
         WSACleanup();
         return 0;
     }
-    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
 
     STARTUPINFOA si{};
     si.cb = sizeof(si);
@@ -2378,10 +2676,44 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
 
     uint32_t nalSeq = 0;
     std::vector<uint8_t> encBlob;
+
+    // Dev-only: datagram loss simulation and a once-a-second transmit report.
+    UdpLossSim loss;
+    loss.init();
+    const bool txStats = loss.on || envFlag("EXTDISPLAY_UDP_STATS");
+    // FEC group size (data fragments per parity packet); 0 = none.
+    const int fecN = static_cast<int>(envNum("EXTDISPLAY_UDP_FEC", kUdpFecDefault));
+    unsigned long long stData = 0, stParity = 0, stKey = 0, stDgrams = 0, stDropped = 0, stNals = 0;
+    double stLast = nowMs();
+
+    auto sendDatagram = [&](const unsigned char* pkt, size_t n) {
+        if (txStats) ++stDgrams;
+        if (loss.drop()) { if (txStats) ++stDropped; return; }
+        sendto(sock, reinterpret_cast<const char*>(pkt), static_cast<int>(n), 0,
+               reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+    };
+    auto putHeader = [](unsigned char* pkt, uint32_t magic, uint32_t seq, uint16_t idx, uint16_t cnt) {
+        auto b = [](uint32_t v) { return static_cast<unsigned char>(v & 0xFF); };
+        pkt[0] = b(magic >> 24); pkt[1] = b(magic >> 16); pkt[2] = b(magic >> 8); pkt[3] = b(magic);
+        pkt[4] = b(seq >> 24); pkt[5] = b(seq >> 16); pkt[6] = b(seq >> 8); pkt[7] = b(seq);
+        pkt[8] = b(idx >> 8); pkt[9] = b(idx); pkt[10] = b(cnt >> 8); pkt[11] = b(cnt);
+    };
+
     auto sendNal = [&](const unsigned char* nal, size_t len) {
         if (len == 0) return;
         const unsigned char* data = nal;
         size_t dlen = len;
+        // What the NAL is (read from the plaintext, before sealing).
+        bool keyish = false;
+        if (txStats) {
+            const int sc = annexBStartLen(nal, len);
+            if (sc > 0 && len > static_cast<size_t>(sc)) {
+                const int h = nal[sc];
+                const int ht = (h >> 1) & 0x3F;
+                keyish = hevc ? ((ht >= 16 && ht <= 21) || (ht >= 32 && ht <= 34))
+                              : ((h & 0x1F) == 5 || (h & 0x1F) == 7 || (h & 0x1F) == 8);
+            }
+        }
         if (vEnc) {
             uint8_t nonce[kGcmNonceLen];
             std::memcpy(nonce, vPrefix, 4);
@@ -2393,73 +2725,68 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
         }
         const uint16_t fragCount = static_cast<uint16_t>(
             (dlen + kUdpPayloadMax - 1) / kUdpPayloadMax);
-        unsigned char pkt[kUdpHeaderSize + kUdpPayloadMax];
+        unsigned char pkt[kUdpHeaderSize + kUdpParityExtra + kUdpPayloadMax];
         for (uint16_t f = 0; f < fragCount; ++f) {
             const size_t off = static_cast<size_t>(f) * kUdpPayloadMax;
             const size_t chunk = (dlen - off < static_cast<size_t>(kUdpPayloadMax))
                                      ? (dlen - off) : static_cast<size_t>(kUdpPayloadMax);
-            auto b = [](uint32_t v) { return static_cast<unsigned char>(v & 0xFF); };
-            pkt[0] = b(kUdpMagic >> 24); pkt[1] = b(kUdpMagic >> 16);
-            pkt[2] = b(kUdpMagic >> 8);  pkt[3] = b(kUdpMagic);
-            pkt[4] = b(nalSeq >> 24); pkt[5] = b(nalSeq >> 16);
-            pkt[6] = b(nalSeq >> 8);  pkt[7] = b(nalSeq);
-            pkt[8] = b(f >> 8);          pkt[9] = b(f);
-            pkt[10] = b(fragCount >> 8); pkt[11] = b(fragCount);
+            putHeader(pkt, kUdpMagic, nalSeq, f, fragCount);
             memcpy(pkt + kUdpHeaderSize, data + off, chunk);
-            sendto(sock, reinterpret_cast<char*>(pkt),
-                   static_cast<int>(kUdpHeaderSize + chunk), 0,
-                   reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+            sendDatagram(pkt, kUdpHeaderSize + chunk);
+            if (txStats) stData += kUdpHeaderSize + chunk;
+        }
+        const int n = fecN;
+        if (n > 0) {
+            const int K = (fragCount + n - 1) / n;
+            for (int g = 0; g < K; ++g) {
+                unsigned char* par = pkt + kUdpHeaderSize + kUdpParityExtra;
+                std::memset(par, 0, kUdpPayloadMax);
+                uint16_t xl = 0;
+                size_t plen = 0;
+                for (int f = g; f < fragCount; f += K) {
+                    const size_t off = static_cast<size_t>(f) * kUdpPayloadMax;
+                    const size_t chunk = (dlen - off < static_cast<size_t>(kUdpPayloadMax))
+                                             ? (dlen - off) : static_cast<size_t>(kUdpPayloadMax);
+                    for (size_t i = 0; i < chunk; ++i) par[i] ^= data[off + i];
+                    xl ^= static_cast<uint16_t>(chunk);
+                    plen = std::max(plen, chunk);
+                }
+                putHeader(pkt, kUdpParityMagic, nalSeq, static_cast<uint16_t>(g), fragCount);
+                pkt[12] = static_cast<unsigned char>(K >> 8); pkt[13] = static_cast<unsigned char>(K);
+                pkt[14] = static_cast<unsigned char>(xl >> 8); pkt[15] = static_cast<unsigned char>(xl);
+                sendDatagram(pkt, kUdpHeaderSize + kUdpParityExtra + plen);
+                if (txStats) stParity += kUdpHeaderSize + kUdpParityExtra + plen;
+            }
+        }
+        if (txStats) {
+            ++stNals;
+            if (keyish) stKey += dlen;
+            const double t = nowMs();
+            if (t - stLast >= 1000.0) {
+                std::cerr << "UDPTX nals=" << stNals << " dataKB=" << stData / 1024
+                          << " parityKB=" << stParity / 1024 << " keyKB=" << stKey / 1024
+                          << " dgrams=" << stDgrams << " dropped=" << stDropped << std::endl;
+                stData = stParity = stKey = stDgrams = stDropped = stNals = 0;
+                stLast = t;
+            }
         }
         ++nalSeq;
     };
 
-    // Streaming Annex-B splitter: emit a NAL once the next start code arrives.
-    auto startCodeLen = [](const std::vector<unsigned char>& b, size_t i) -> int {
-        if (i + 3 <= b.size() && b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 1) return 3;
-        if (i + 4 <= b.size() && b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 0 &&
-            b[i + 3] == 1) return 4;
-        return 0;
-    };
-    auto nextStart = [&](const std::vector<unsigned char>& b, size_t from) -> size_t {
-        for (size_t i = from; i + 3 <= b.size(); ++i) {
-            if (b[i] == 0 && b[i + 1] == 0 &&
-                (b[i + 2] == 1 || (b[i + 2] == 0 && i + 3 < b.size() && b[i + 3] == 1))) {
-                return i;
-            }
-        }
-        return std::string::npos;
-    };
+    bool udpAvi = false;
+    const bool udpBad = pumpAnnexB(readPipe, "udp", [] { return !g_stop.load(); },
+               [&](const unsigned char* nal, size_t len, bool, bool) { sendNal(nal, len); }, udpAvi);
 
-    std::vector<unsigned char> buf;
-    buf.reserve(1 << 20);
-    unsigned char chunk[65536];
-    DWORD got = 0;
-    size_t base = std::string::npos;  // index of the current NAL's start code
-    while (!g_stop.load() &&
-           ReadFile(readPipe, chunk, sizeof(chunk), &got, nullptr) && got > 0) {
-        buf.insert(buf.end(), chunk, chunk + got);
-        if (base == std::string::npos) base = nextStart(buf, 0);
-        if (base == std::string::npos) continue;  // no start code seen yet
-        // Emit every complete NAL, advancing a cursor (no per-NAL erase).
-        size_t next = nextStart(buf, base + startCodeLen(buf, base));
-        while (next != std::string::npos) {
-            sendNal(buf.data() + base, next - base);
-            base = next;
-            next = nextStart(buf, base + startCodeLen(buf, base));
-        }
-        // Compact once per read: drop everything before the trailing partial NAL.
-        if (base > 0) {
-            buf.erase(buf.begin(), buf.begin() + base);
-            base = 0;
-        }
-    }
-
-    WaitForSingleObject(pi.hProcess, g_stop.load() ? 0 : INFINITE);
-    if (g_stop.load()) TerminateProcess(pi.hProcess, 1);
+    // A corrupt stream ends the pump while ffmpeg keeps running with the pipe open:
+    // stop it instead of waiting for an exit that never comes.
+    WaitForSingleObject(pi.hProcess, (g_stop.load() || udpBad) ? 0 : INFINITE);
+    if (g_stop.load() || udpBad) TerminateProcess(pi.hProcess, 1);
     ULONGLONG uptime = GetTickCount64() - started;
-    // Don't let a non-zero ffmpeg exit count as a "proven" config.
+    // Don't let a non-zero ffmpeg exit count as a "proven" config (but a stop we
+    // asked for kills it with exit code 1: that is not a failure).
     DWORD exitCode = 0;
-    if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0 && exitCode != STILL_ACTIVE) {
+    if (udpBad || (!g_stop.load() && GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0 &&
+                   exitCode != STILL_ACTIVE)) {
         uptime = 0;
     }
     g_child.exchange(nullptr);  // claim before close so the ctrl handler can't race
@@ -2471,6 +2798,8 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
     return uptime;
 }
 
+// (Also serves plaintext TCP: with no pairing key it skips the marker and the
+// encryption and appends a frame-end AUD, so the tablet need not wait a frame.)
 // Encrypted TCP video: route ffmpeg's NALs through the sender, AES-256-GCM each one,
 // and send it length-prefixed over a reliable TCP connection to the tablet. Used
 // when paired (g_pairKey) and NOT --udp, so encrypted Wi-Fi keeps TCP's
@@ -2482,8 +2811,9 @@ ULONGLONG runUdpAttempt(const std::string& cmd, const std::string& host, int udp
 // announceStable: print a line once the stream has survived kProvenUptimeMs (the
 // GUI uses it to leave its "enter the code" state).
 ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host, int tcpPort,
-                                 bool& peerClosed, bool announceStable) {
+                                 bool& peerClosed, bool announceStable, bool hevc) {
     peerClosed = false;
+    const bool encrypted = g_pairKey.has_value();
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -2505,12 +2835,10 @@ ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host
     unsigned char vmagic[4] = {
         static_cast<unsigned char>(kEncVideoMagic >> 24), static_cast<unsigned char>(kEncVideoMagic >> 16),
         static_cast<unsigned char>(kEncVideoMagic >> 8),  static_cast<unsigned char>(kEncVideoMagic) };
-    if (!sendAll(sock, vmagic, 4)) { closesocket(sock); WSACleanup(); return 0; }
+    if (encrypted && !sendAll(sock, vmagic, 4)) { closesocket(sock); WSACleanup(); return 0; }
 
-    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
     HANDLE readPipe = nullptr, writePipe = nullptr;
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 1 << 20)) { closesocket(sock); WSACleanup(); return 0; }
-    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+    if (!createVideoPipe(readPipe, writePipe)) { closesocket(sock); WSACleanup(); return 0; }
     STARTUPINFOA si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = writePipe;
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
@@ -2527,79 +2855,89 @@ ULONGLONG runEncryptedTcpAttempt(const std::string& cmd, const std::string& host
     const ULONGLONG started = GetTickCount64();
 
     AesGcm venc;
-    bool encOk = g_pairKey && venc.init(*g_pairKey);
+    bool encOk = encrypted && venc.init(*g_pairKey);
     uint8_t vPrefix[4] = {0x01, 0, 0, 0};
     if (encOk) BCryptGenRandom(nullptr, vPrefix + 1, 3, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
     uint64_t vCtr = 0;
     std::vector<uint8_t> blob;
-    bool alive = encOk;
+    std::vector<unsigned char> out;  // one send() per NAL (encrypted) / per frame (plain)
+    bool alive = encrypted ? encOk : true;
+    bool tcpAvi = false;       // set by the pump: frame ends are proven (frame-end AUD allowed)
+    bool batchHasSlice = false;  // the batch being assembled contains a picture slice
 
-    auto sendNal = [&](const unsigned char* nal, size_t len) {
+    // Encrypted: [4-byte BE length][nonce+ct+tag] per NAL in ONE send().
+    // Plain: the frame's NALs go out in ONE send(), followed by an AUD that marks
+    // the end of the frame (see kAudH264) so the tablet's byte-stream splitter does
+    // not have to wait for the next frame to find the last NAL's end.
+    auto sendNal = [&](const unsigned char* nal, size_t len, bool flush, bool frameEnd) {
         if (len == 0 || !alive) return;
-        uint8_t nonce[kGcmNonceLen];
-        std::memcpy(nonce, vPrefix, 4);
-        ++vCtr;
-        for (int i = 0; i < 8; ++i) nonce[4 + i] = static_cast<uint8_t>(vCtr >> (8 * (7 - i)));
-        if (!venc.encrypt(nal, static_cast<int>(len), nonce, blob)) return;
-        const uint32_t n = static_cast<uint32_t>(blob.size());
-        unsigned char hdr[4] = { static_cast<unsigned char>(n >> 24), static_cast<unsigned char>(n >> 16),
-                                 static_cast<unsigned char>(n >> 8), static_cast<unsigned char>(n) };
-        if (!sendAll(sock, hdr, 4) || !sendAll(sock, blob.data(), static_cast<int>(blob.size()))) {
-            alive = false;  // tablet closed the connection
+        if (encrypted) {
+            uint8_t nonce[kGcmNonceLen];
+            std::memcpy(nonce, vPrefix, 4);
+            ++vCtr;
+            for (int i = 0; i < 8; ++i) nonce[4 + i] = static_cast<uint8_t>(vCtr >> (8 * (7 - i)));
+            if (!venc.encrypt(nal, static_cast<int>(len), nonce, blob)) return;
+            const uint32_t n = static_cast<uint32_t>(blob.size());
+            out.resize(4 + blob.size());
+            out[0] = static_cast<unsigned char>(n >> 24); out[1] = static_cast<unsigned char>(n >> 16);
+            out[2] = static_cast<unsigned char>(n >> 8);  out[3] = static_cast<unsigned char>(n);
+            std::memcpy(out.data() + 4, blob.data(), blob.size());
+            if (!sendAll(sock, out.data(), static_cast<int>(out.size()))) alive = false;
+            return;
         }
+        // The encoder may already put an AUD in front of every frame (AMF does). Our
+        // own AUD after each frame takes that role, so drop theirs: one delimiter
+        // per frame, none duplicated.
+        const int sc = annexBStartLen(nal, len);
+        const bool isAud = sc > 0 && len > static_cast<size_t>(sc) &&
+            (hevc ? (((nal[sc] >> 1) & 0x3F) == 35 && (nal[sc] & 0x80) == 0)
+                  : ((nal[sc] & 0x9F) == 0x09));
+        // Only replace the encoder's own AUD when ours will follow the frame (AVI
+        // mode); the legacy raw stream keeps theirs.
+        if (!(isAud && tcpAvi)) out.insert(out.end(), nal, nal + len);
+        if (sc > 0 && len > static_cast<size_t>(sc)) {
+            const int t = hevc ? ((nal[sc] >> 1) & 0x3F) : (nal[sc] & 0x1F);
+            if (hevc ? t < 32 : (t >= 1 && t <= 5)) batchHasSlice = true;
+        }
+        if (!flush) return;
+        if (out.empty()) return;
+        // An AUD opens a NEW access unit: add it only after a batch that holds a
+        // picture slice (parameter sets alone would leave an empty access unit).
+        if (frameEnd && batchHasSlice) {
+            if (hevc) out.insert(out.end(), kAudHevc, kAudHevc + sizeof(kAudHevc));
+            else out.insert(out.end(), kAudH264, kAudH264 + sizeof(kAudH264));
+        }
+        batchHasSlice = false;
+        if (!sendAll(sock, out.data(), static_cast<int>(out.size()))) alive = false;
+        out.clear();
     };
 
-    auto startCodeLen = [](const std::vector<unsigned char>& b, size_t i) -> int {
-        if (i + 3 <= b.size() && b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 1) return 3;
-        if (i + 4 <= b.size() && b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 0 && b[i + 3] == 1) return 4;
-        return 0;
-    };
-    auto nextStart = [&](const std::vector<unsigned char>& b, size_t from) -> size_t {
-        for (size_t i = from; i + 3 <= b.size(); ++i) {
-            if (b[i] == 0 && b[i + 1] == 0 &&
-                (b[i + 2] == 1 || (b[i + 2] == 0 && i + 3 < b.size() && b[i + 3] == 1))) {
-                return i;
-            }
-        }
-        return std::string::npos;
-    };
-
-    std::vector<unsigned char> buf;
-    buf.reserve(1 << 20);
-    unsigned char chunk[65536];
-    DWORD got = 0;
-    size_t base = std::string::npos;
-    while (!g_stop.load() && alive &&
-           ReadFile(readPipe, chunk, sizeof(chunk), &got, nullptr) && got > 0) {
-        if (announceStable && GetTickCount64() - started >= kProvenUptimeMs) {
-            announceStable = false;
-            std::cout << "Tablet accepted the pairing code - streaming." << std::endl;
-        }
-        buf.insert(buf.end(), chunk, chunk + got);
-        if (base == std::string::npos) base = nextStart(buf, 0);
-        if (base == std::string::npos) continue;
-        size_t next = nextStart(buf, base + startCodeLen(buf, base));
-        while (next != std::string::npos) {
-            sendNal(buf.data() + base, next - base);
-            base = next;
-            next = nextStart(buf, base + startCodeLen(buf, base));
-        }
-        if (base > 0) { buf.erase(buf.begin(), buf.begin() + base); base = 0; }
-    }
+    bool announced = !announceStable;
+    const bool tcpBad = pumpAnnexB(readPipe, encrypted ? "tcp-enc" : "tcp", [&] { return !g_stop.load() && alive; },
+               [&](const unsigned char* nal, size_t len, bool flush, bool frameEnd) {
+                   if (!announced && GetTickCount64() - started >= kProvenUptimeMs) {
+                       announced = true;
+                       std::cout << "Tablet accepted the pairing code - streaming." << std::endl;
+                   }
+                   sendNal(nal, len, flush, frameEnd);
+               }, tcpAvi);
 
     // ffmpeg only exits on its own when ITS pipe breaks. If the tablet dropped the
     // TCP connection (alive == false, e.g. the app restarted), ffmpeg is still
     // running and blocked on the now-undrained pipe — waiting INFINITE here would
     // deadlock the whole session. Kill it so the supervisor can reconnect.
-    peerClosed = encOk && !alive;
-    WaitForSingleObject(pi.hProcess, (g_stop.load() || !alive) ? 0 : INFINITE);
+    // Any TCP peer that dropped the connection (plain or encrypted) is reported, so
+    // the supervisor reconnects with the SAME encoder; only the pairing-mismatch
+    // prompt is specific to encrypted streams.
+    peerClosed = (!encrypted || encOk) && !alive;
+    WaitForSingleObject(pi.hProcess, (g_stop.load() || !alive || tcpBad) ? 0 : INFINITE);
     TerminateProcess(pi.hProcess, 1);  // no-op if it already exited
     ULONGLONG uptime = GetTickCount64() - started;
     DWORD exitCode = 0;
     // A peer disconnect (!alive) is a clean stream end, not an encoder failure —
     // keep the uptime so the supervisor reconnects instead of walking the ladder.
-    if (alive && GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0 &&
-        exitCode != STILL_ACTIVE) {
+    if (tcpBad || (alive && !g_stop.load() && GetExitCodeProcess(pi.hProcess, &exitCode) &&
+                   exitCode != 0 && exitCode != STILL_ACTIVE)) {
         uptime = 0;
     }
     g_child.exchange(nullptr);
@@ -2717,6 +3055,9 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
 
         const std::string cmd = buildStreamCommand(ffmpeg, options, display, attempt, host);
         const bool encTcp = !options.udp && g_pairKey.has_value();
+        // Plaintext TCP goes through the sender too (it appends a frame-end marker),
+        // unless the dev switch EXTDISPLAY_DIRECT_TCP=1 asks for the old direct path.
+        const bool relayTcp = !options.udp && (encTcp || !directTcpDev());
         std::cout << "\nStreaming " << display.name
                   << " with " << attempt.encoder
                   << (attempt.zeroCopy ? " (GPU zero-copy)" : "")
@@ -2725,17 +3066,29 @@ int runSupervised(const Options& options, const std::string& ffmpeg,
 
         ULONGLONG uptime = 0;
         if (options.udp) {
-            uptime = runUdpAttempt(cmd, host, options.port);
-        } else if (encTcp) {
+            uptime = runUdpAttempt(cmd, host, options.port, options.hevc);
+        } else if (relayTcp) {
             bool peerClosed = false;
-            uptime = runEncryptedTcpAttempt(cmd, host, options.port, peerClosed, mismatchReported);
+            uptime = runEncryptedTcpAttempt(cmd, host, options.port, peerClosed,
+                                            encTcp && mismatchReported, options.hevc);
             if (g_stop.load()) break;
+            if (peerClosed && uptime < kProvenUptimeMs && !encTcp) {
+                // Plaintext: the tablet closed the connection (app restarted, cable
+                // blip) soon after it opened. That is not an encoder failure: retry
+                // the SAME encoder, never walk the ladder.
+                sleepInterruptible(1500);
+                continue;
+            }
             if (peerClosed && uptime < kProvenUptimeMs) {
                 // The tablet took the connection and closed it at once. Twice in a
                 // row is a pairing mismatch: say so and keep retrying with the SAME
                 // encoder (before, this walked the encoder ladder and gave up with
                 // "All encoder configurations failed").
-                if (++shortDrops >= 2 && !mismatchReported) {
+                if (++shortDrops == 1) {
+                    sleepInterruptible(1500);  // first quick close: just retry, not an encoder failure
+                    continue;
+                }
+                if (!mismatchReported) {
                     mismatchReported = true;
                     std::cout << "Pairing code mismatch - the tablet keeps closing the encrypted "
                                  "stream. Enter this PC's pairing code on the tablet (it is "

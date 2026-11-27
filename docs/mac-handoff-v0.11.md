@@ -27,7 +27,9 @@ Read README.md, CHANGELOG.md (the v0.11.0 entry), docs/mac.md and docs/protocol.
 
 ## Known Mac items to fix (from the Windows session)
 - **The Mac app still says "Extended Display".** Rename it to **DualSlate** everywhere a user sees
-  it (task 2).
+  it (task 2). That includes the installed application itself: the `.app` in /Applications,
+  the name under its Dock icon, the menu bar title, and the DMG volume name must all read
+  DualSlate. On Windows the app is now `DualSlate.exe` with "DualSlate" shortcuts.
 - **Its pairing hint says the code box is "at the top".** The tablet now shows a centred code
   prompt, so the text must say that (task 3).
 - **An APK built on the Mac won't install over the Windows-built one.** Each computer signs the
@@ -64,10 +66,11 @@ Read README.md, CHANGELOG.md (the v0.11.0 entry), docs/mac.md and docs/protocol.
 - Work on a branch and open a PR; never push to `main` directly.
 - Ask before anything that deletes data on the tablet or changes my pairing code. Uninstalling
   the tablet app wipes the saved pairing key.
-- **APK signing:** the tablet app is debug-signed with the debug keystore of the machine that
-  built it. An APK built on this Mac has a different signature, so `adb install -r` will fail
-  with INSTALL_FAILED_UPDATE_INCOMPATIBLE over the Windows-built one. Do not uninstall to get
-  around it: stop and ask me. The fix is to copy `%USERPROFILE%\.android\debug.keystore` from
-  the Windows PC to `~/.android/debug.keystore` on the Mac, or to set up a shared release
-  keystore.
+- **APK signing:** there is now one shared release key (docs/signing.md).
+  - The build uses it automatically when `~/.dualslate/signing.properties` exists. I will copy
+    my `.dualslate` folder from the Windows PC to `~/.dualslate/` on the Mac.
+  - Before building an APK on the Mac, check the folder is there. Then check the result with
+    `apksigner verify --print-certs`: it must say `CN=DualSlate`, not `CN=Android Debug`.
+  - If `adb install -r` fails with INSTALL_FAILED_UPDATE_INCOMPATIBLE, do not uninstall to get
+    around it: stop and ask me. Uninstalling wipes the saved pairing code.
 - Do not commit build outputs (APK, DMG).

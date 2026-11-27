@@ -21,6 +21,7 @@
 // pixels so they do not depend on the system DPI.
 
 using System;
+using System.Reflection;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -33,6 +34,14 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
+
+// Shown by Explorer (file properties) and Task Manager.
+[assembly: AssemblyTitle("DualSlate")]
+[assembly: AssemblyProduct("DualSlate")]
+[assembly: AssemblyCompany("Namans12")]
+[assembly: AssemblyDescription("DualSlate - use an Android tablet as an extended display")]
+[assembly: AssemblyVersion("0.11.1.0")]
+[assembly: AssemblyFileVersion("0.11.1.0")]
 
 namespace ExtendedDisplay
 {
@@ -843,6 +852,25 @@ namespace ExtendedDisplay
         void OnLoaded(Vdd.Result r, string detail)
         {
             if (closing) return;
+            if (r == Vdd.Result.NotInstalled &&
+                File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "driver-pending.flag")))
+            {
+                // install-vdd.ps1: Windows must restart before the driver can attach; it
+                // finishes by itself at the next start.
+                SetState(AppState.Fault);
+                SetPill("Restart needed", Tone.Warn);
+                SetDetail("Restart Windows once to finish installing the virtual display driver. It completes by itself during the restart; then open DualSlate again.");
+                return;
+            }
+            if (r == Vdd.Result.NotInstalled &&
+                File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "driver-failed.flag")))
+            {
+                SetState(AppState.Fault);
+                SetPill("Driver failed", Tone.Bad);
+                SetDetail("The virtual display driver could not be installed on this PC. Details: install-vdd.log in " +
+                          AppDomain.CurrentDomain.BaseDirectory + " - please attach it to a GitHub issue.");
+                return;
+            }
             if (r == Vdd.Result.NotInstalled)
             {
                 SetState(AppState.Fault);

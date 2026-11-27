@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased (branch dualslate-next)
+
+- **Lower delay.** Every frame's picture slice used to wait for the next frame's data before it
+  was sent or decoded: measured 17-20 ms per frame on average, up to about 50 ms, on plaintext
+  USB, encrypted USB and Wi-Fi UDP, H.264 and HEVC. Now 0 ms.
+  - ffmpeg's output is read as AVI, so the sender knows exactly where each frame ends.
+  - The plaintext USB path now goes through the sender too, which closes each frame with an
+    access-unit delimiter so the tablet decodes it at once.
+  - Streams without delimiters (the Mac host, older senders) decode exactly as before.
+  - Verified on the tablet with AMF and NVENC; no decode errors.
+- **Smoother Wi-Fi UDP.** XOR parity (one packet per 4 fragments, about 27 % more UDP
+  bandwidth) rebuilds a lost fragment.
+  - Measured with simulated loss: lost video pieces at 1/3/5 % loss fell from 472/1041/1327
+    to 15/117/280, and frames per second at 1 % loss rose from 33 to 44.
+  - After a loss the tablet holds the last clean frame until the next keyframe (now every
+    0.5 s on UDP) instead of showing smeared video.
+  - Old receivers ignore the parity packets, and senders without them behave as before.
+- **Fixed: a second UDP session showed a frozen old frame** until the tablet app was
+  restarted (the reassembler kept the old sequence numbers).
+- **Fixed (from an independent review):**
+  - the sender could hang if the video reader gave up;
+  - a tablet disconnect in the first seconds was treated as an encoder failure;
+  - a Stop discarded the "this encoder works" cache;
+  - three AVI and delimiter edge cases.
+- **The PC app is now `DualSlate.exe`.** File details say DualSlate. Upgrades remove the old
+  exe and all old "Extended Display" shortcuts, including on the user's own desktop.
+- **Fixed: the v0.11.0 installer could not install the virtual display on normal (x64) PCs.**
+  It bundled the ARM64 build of the driver: the payload script took the first driver folder in
+  the release archive. It now picks the x64 build. The installer also refuses a driver that
+  doesn't match the PC, keeps a log (install-vdd.log), and the app says "Driver failed" if it
+  still can't install. Verified: "Drivers installed successfully" without a restart.
+- **Installer publisher** is now Namans12 (it said HeySnap).
+- **Installer** (found by a full uninstall and reinstall test):
+  - The uninstaller no longer turns off real external monitors (it used to apply "laptop
+    screen only").
+  - Old driver packages are really removed (a case-sensitive name match had left them).
+  - A reinstall that needs a restart now asks for one and finishes the driver by itself at
+    the next start. It used to fail silently, and the app now says "Restart needed".
+  - It never stacks duplicate display devices.
+  - It leaves the driver unloaded until the app is opened.
+  - THIRD_PARTY_NOTICES.md is installed with the app.
+- **Shared signing key** for the tablet app (docs/signing.md): builds on any machine
+  update each other. The sender explains a signature mismatch instead of failing silently.
+- **Tablet follows an upside-down flip** (already in v0.11.0's APK).
+- **Docs:** FUTURE_FEATURES.md, THIRD_PARTY_NOTICES.md, a security reporting section, and
+  README fixes.
+
 ## v0.11.0 — 2026-11-20 (receiver v10 built + Windows host reworked, verified on device)
 
 Receiver **v10** (versionCode 10, versionName 0.11.0) built on Windows for the

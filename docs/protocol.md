@@ -55,6 +55,37 @@ struct UdpNalHeader {
 The receiver reassembles by `nalSeq`; a NAL with a missing fragment is dropped
 (moving to a new `nalSeq` discards the incomplete one), so a lost packet causes a
 brief glitch that clears on the next keyframe rather than corrupting the decoder.
+### UDP loss protection (optional, additive)
+
+The Windows sender also sends XOR parity packets with a different magic. A receiver
+that does not know it ignores the datagram (the old reassembler returns on any magic
+other than `EXUD`), and senders that send none (older builds, the Mac host) work as before.
+
+```c
+struct UdpParityHeader {
+  uint32_t magic;     // 'EXUP' = 0x45585550
+  uint32_t nalSeq;    // the NAL this parity protects
+  uint16_t group;     // parity group number g (0 <= g < K)
+  uint16_t fragCount; // the NAL's fragment count
+};                    // then: u16 K (group count), u16 XOR of the member fragment
+                      // lengths, XOR of the member payloads (zero padded, <= 1400 B)
+```
+
+Group `g` holds fragments `g, g+K, g+2K, ...` (interleaved, so a burst of up to K
+consecutive lost datagrams hits K different groups), `K = ceil(fragCount / 4)`. Parity
+packets follow the NAL's data packets. A receiver rebuilds the one missing fragment of a
+group (the length comes from the XORed lengths); two missing in one group still drop the
+NAL. Parity is computed over the (possibly sealed) fragment bytes, so it works the same
+with encryption.
+
+A restarted sender begins `nalSeq` at 0 again. The receiver treats a change of datagram
+source (address or port), or `nalSeq` going backwards after 500 ms of silence or by more
+than 100000, as a new stream; a live stream does neither.
+
+When parity is present the receiver also holds the last good frame after a lost NAL
+until the next IDR (1.5 s limit) instead of decoding frames that reference the hole.
+The sender uses a 500 ms keyframe interval for UDP (TCP unchanged).
+
 Touch always stays on TCP (input must not drop) even when video is UDP.
 
 ## Discovery (Wi-Fi)

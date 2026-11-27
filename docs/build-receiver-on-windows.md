@@ -292,7 +292,7 @@ at hand, and ideally both.
 
 ### With the Windows host
 
-Run `ExtendedDisplay.exe` (installed copy, or a build from `windows-sender`), choose USB, and press **Start Streaming**.
+Run `DualSlate.exe` (installed copy, or a build from `windows-sender`), choose USB, and press **Start Streaming**.
 
 | Do this | Expect on the tablet |
 |---|---|

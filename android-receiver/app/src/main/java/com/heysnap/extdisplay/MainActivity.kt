@@ -825,41 +825,125 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
  * emitted once all its fragments arrive. Moving to a new nalSeq drops any
  * incomplete previous NAL (a lost fragment), so playback recovers on the next
  * keyframe rather than corrupting the stream. Called from a single thread.
+ *
+ * Optional parity packets (magic 'EXUP', see docs/protocol.md) let one lost
+ * fragment per parity group be rebuilt; senders that do not send them (older
+ * Windows senders, the Mac host) work exactly as before.
+ *
+ * A sender restart (its nalSeq starts again at 0) is recognised so the new
+ * stream is not discarded as "late": by [resetSession] when the datagrams' source
+ * changes, or here when nalSeq goes backwards after a silence or by a huge jump.
+ * A live stream never does either, so it cannot be cut off by this.
  */
 private const val MAX_FRAGMENTS = 4096  // >5.7 MB per NAL at 1400B fragments
+private const val UDP_MAGIC = 0x45585544          // 'EXUD'
+private const val UDP_PARITY_MAGIC = 0x45585550   // 'EXUP'
+private const val UDP_FRAG_MAX = 1400
+private const val UDP_CONCEAL_DEFAULT = true   // after a loss, hold the last good frame until the next keyframe
+private const val UDP_CONCEAL_MAX_MS = 1500L
+private const val UDP_RESTART_SILENCE_MS = 500L
+private const val UDP_RESTART_JUMP = 100_000L
 
-private class UdpReassembler(private val onNal: (ByteArray) -> Unit) {
+private class UdpReassembler(
+    private val onNal: (ByteArray) -> Unit,
+    // Called when a NAL is known lost (incomplete, or skipped), before the next
+    // NAL is delivered.
+    private val onLoss: () -> Unit = {}
+) {
     private var curSeq = -1L
     private var fragCount = 0
     private var received = 0
     private var fragments: Array<ByteArray?> = arrayOf()
-    private var emitted = false
+    private var emitted = true
+    private var parity: Array<ByteArray?> = arrayOf()   // per parity group, or empty
+    private var parityXl = IntArray(0)
+    private var lastPacketMs = 0L
+
+    // Dev statistics (cheap increments; read by the stats printer).
+    @Volatile var nalsOk = 0L
+    @Volatile var nalsLost = 0L
+    @Volatile var fragsRecovered = 0L
+    @Volatile var packets = 0L
+    /** True once a parity packet arrived in this session (the sender protects its NALs). */
+    @Volatile var sawParity = false
+
+    /** The sender (source address/port) changed: forget the previous stream. */
+    fun resetSession() {
+        curSeq = -1L
+        fragments = arrayOf()
+        parity = arrayOf()
+        emitted = true
+        received = 0
+        fragCount = 0
+        sawParity = false
+    }
 
     fun onPacket(data: ByteArray, len: Int) {
         if (len < 12) return
         val magic = ((data[0].toInt() and 0xFF) shl 24) or ((data[1].toInt() and 0xFF) shl 16) or
             ((data[2].toInt() and 0xFF) shl 8) or (data[3].toInt() and 0xFF)
-        if (magic != 0x45585544) return  // 'EXUD'
+        val isParity = magic == UDP_PARITY_MAGIC
+        if (magic != UDP_MAGIC && !isParity) return  // not ours: ignore
         val seq = ((data[4].toLong() and 0xFF) shl 24) or ((data[5].toLong() and 0xFF) shl 16) or
             ((data[6].toLong() and 0xFF) shl 8) or (data[7].toLong() and 0xFF)
-        val fragIndex = ((data[8].toInt() and 0xFF) shl 8) or (data[9].toInt() and 0xFF)
+        val idx = ((data[8].toInt() and 0xFF) shl 8) or (data[9].toInt() and 0xFF)
         val fc = ((data[10].toInt() and 0xFF) shl 8) or (data[11].toInt() and 0xFF)
         // Bound fragCount so a malformed/hostile packet can't allocate huge arrays.
-        if (fc <= 0 || fc > MAX_FRAGMENTS || fragIndex >= fc) return
-        // Drop late fragments from an already-passed NAL so they can't reset state.
-        if (seq < curSeq) return
+        if (fc <= 0 || fc > MAX_FRAGMENTS) return
+        if (isParity) {
+            if (len < 16 || idx >= fc) return
+        } else if (idx >= fc) {
+            return
+        }
+        packets++
+        if (isParity) sawParity = true
+        val now = android.os.SystemClock.uptimeMillis()
+        if (seq < curSeq) {
+            // Normally a late fragment of a NAL already passed: drop it. But a sender
+            // that restarted counts from 0 again; after a silence, or a huge step
+            // back, that is a new stream.
+            if (now - lastPacketMs > UDP_RESTART_SILENCE_MS || curSeq - seq > UDP_RESTART_JUMP) {
+                resetSession()
+            } else {
+                return
+            }
+        }
+        lastPacketMs = now
 
         if (seq != curSeq) {
+            if (curSeq >= 0) {
+                var lost = seq - curSeq - 1                 // NALs of which nothing arrived
+                if (!emitted && fragments.isNotEmpty()) lost++  // the previous one is incomplete
+                if (lost > 0) {
+                    nalsLost += lost
+                    onLoss()
+                }
+            }
             curSeq = seq
             fragCount = fc
             received = 0
             fragments = arrayOfNulls(fc)
+            parity = arrayOf()
             emitted = false
         }
         if (emitted || fragments.size != fc) return
-        if (fragments[fragIndex] == null) {
-            fragments[fragIndex] = data.copyOfRange(12, len)
-            received++
+
+        if (isParity) {
+            val k = ((data[12].toInt() and 0xFF) shl 8) or (data[13].toInt() and 0xFF)
+            if (k <= 0 || k > fc || idx >= k) return
+            if (parity.size != k) {
+                parity = arrayOfNulls(k)
+                parityXl = IntArray(k)
+            }
+            parity[idx] = data.copyOfRange(16, len)
+            parityXl[idx] = ((data[14].toInt() and 0xFF) shl 8) or (data[15].toInt() and 0xFF)
+            recoverGroup(idx)
+        } else {
+            if (fragments[idx] == null) {
+                fragments[idx] = data.copyOfRange(12, len)
+                received++
+            }
+            if (parity.isNotEmpty() && received < fragCount) recoverGroup(idx % parity.size)
         }
         if (received == fragCount) {
             val total = fragments.sumOf { it?.size ?: 0 }
@@ -871,9 +955,43 @@ private class UdpReassembler(private val onNal: (ByteArray) -> Unit) {
                     off += f.size
                 }
             }
-            onNal(nal)
             emitted = true
+            nalsOk++
+            onNal(nal)
         }
+    }
+
+    // Rebuilds the fragment missing from parity group [g] when exactly one is.
+    private fun recoverGroup(g: Int) {
+        val k = parity.size
+        val p = parity.getOrNull(g) ?: return
+        var missing = -1
+        var f = g
+        while (f < fragCount) {
+            if (fragments[f] == null) {
+                if (missing >= 0) return          // two or more missing: not recoverable
+                missing = f
+            }
+            f += k
+        }
+        if (missing < 0) return
+        val out = p.copyOf()
+        var xl = parityXl[g]
+        f = g
+        while (f < fragCount) {
+            val frag = fragments[f]
+            if (frag != null) {
+                if (frag.size > out.size) return  // inconsistent: ignore this parity
+                for (i in frag.indices) out[i] = (out[i].toInt() xor frag[i].toInt()).toByte()
+                xl = xl xor frag.size
+            }
+            f += k
+        }
+        // Only the last fragment of a NAL may be short.
+        if (xl <= 0 || xl > out.size || (missing != fragCount - 1 && xl != UDP_FRAG_MAX)) return
+        fragments[missing] = out.copyOf(xl)
+        received++
+        fragsRecovered++
     }
 }
 
@@ -1083,6 +1201,143 @@ private class H264TcpReceiver(
         }
     }
 
+    // ---- UDP loss handling (receiver side) and dev statistics ----------------
+    // Concealment: after a NAL is lost, frames that reference it would be decoded
+    // from a broken picture (smeared blocks). Until the next keyframe they are not
+    // fed to the decoder, so the last good frame stays on screen. Parameter sets and
+    // keyframes always pass. If no keyframe comes within UDP_CONCEAL_MAX_MS the gate
+    // opens again (a host with sparse keyframes must not freeze for good).
+    private var udpHevc = false
+    @Volatile private var udpNeedKey = false
+    @Volatile private var udpNeedKeyAt = 0L
+    @Volatile private var udpConceal = UDP_CONCEAL_DEFAULT
+    @Volatile private var udpReasm: UdpReassembler? = null
+    // Dev statistics, only when `adb shell setprop debug.extdisplay.udp 1` was set
+    // before the sender started (read once per new sender, never in the hot path).
+    @Volatile private var udpStats = false
+    private var stWinStart = 0L
+    private var stLastRender = 0L
+    private var stFrames = 0
+    private var stMaxGap = 0L
+    private var stG100 = 0
+    private var stG250 = 0
+    private var stG500 = 0
+    @Volatile private var stSkipped = 0L
+    private var stPrevOk = 0L
+    private var stPrevLost = 0L
+    private var stPrevFec = 0L
+    private var stPrevPk = 0L
+    private var stPrevSkip = 0L
+
+    private fun sysProp(key: String): String {
+        try {
+            return Class.forName("android.os.SystemProperties")
+                .getMethod("get", String::class.java, String::class.java)
+                .invoke(null, key, "") as String
+        } catch (_: Throwable) {
+        }
+        return try {
+            val proc = Runtime.getRuntime().exec(arrayOf("getprop", key))
+            proc.inputStream.bufferedReader().readText().trim()
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    private fun refreshUdpDevProps() {
+        udpStats = sysProp("debug.extdisplay.udp") == "1"
+        udpConceal = UDP_CONCEAL_DEFAULT
+        if (udpStats) {
+            when (sysProp("debug.extdisplay.udpconceal")) {
+                "1" -> udpConceal = true
+                "0" -> udpConceal = false
+            }
+            stWinStart = 0L
+            stLastRender = 0L
+            stFrames = 0; stMaxGap = 0; stG100 = 0; stG250 = 0; stG500 = 0
+            stSkipped = 0; stPrevSkip = 0
+            stPrevOk = 0; stPrevLost = 0; stPrevFec = 0; stPrevPk = 0
+            Log.i("UDPSTAT", "session start conceal=$udpConceal")
+        }
+    }
+
+    // Only for senders that send parity (this repo's Windows sender): with FEC a loss
+    // is rare, so holding the picture until the next keyframe is a short pause. A
+    // sender without FEC (older Windows builds, the Mac host) loses far more NALs
+    // (measured: ~16% of them at 1% datagram loss) and would sit frozen, so there
+    // the previous behaviour (keep decoding) stays.
+    private fun onUdpLoss() {
+        if (!udpConceal || udpReasm?.sawParity != true) return
+        udpNeedKey = true
+        udpNeedKeyAt = android.os.SystemClock.uptimeMillis()
+    }
+
+    // H.264: IDR slice (5). HEVC: IRAP (16..21). Parameter sets: H.264 7/8, HEVC 32..34.
+    private fun isKeyOrParam(nal: ByteArray): Boolean {
+        val sc = if (nal.size >= 4 && nal[2] == 0.toByte()) 4 else 3
+        if (nal.size <= sc) return true
+        val h = nal[sc].toInt() and 0xFF
+        return if (udpHevc) ((h shr 1) and 0x3F).let { it in 16..21 || it in 32..34 }
+        else (h and 0x1F).let { it == 5 || it == 7 || it == 8 }
+    }
+
+    private fun isKeyframe(nal: ByteArray): Boolean {
+        val sc = if (nal.size >= 4 && nal[2] == 0.toByte()) 4 else 3
+        if (nal.size <= sc) return false
+        val h = nal[sc].toInt() and 0xFF
+        return if (udpHevc) ((h shr 1) and 0x3F) in 16..21 else (h and 0x1F) == 5
+    }
+
+    // UDP feeder thread: hands a complete NAL to the decoder queue (or holds it
+    // back while concealing a loss).
+    private fun deliverUdp(nal: ByteArray) {
+        if (startsStream(nal)) udpHevc = detectCodec(nal) == MIME_HEVC
+        if (udpNeedKey) {
+            if (isKeyframe(nal)) {
+                udpNeedKey = false
+            } else if (!isKeyOrParam(nal)) {
+                if (android.os.SystemClock.uptimeMillis() - udpNeedKeyAt <= UDP_CONCEAL_MAX_MS) {
+                    if (udpStats) stSkipped++
+                    return
+                }
+                udpNeedKey = false
+            }
+        }
+        nalQueue.offer(QNal(streamGeneration.get(), nal))
+    }
+
+    // Decode thread: a frame was presented.
+    private fun statsFrame() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (stLastRender != 0L) {
+            val gap = now - stLastRender
+            if (gap > stMaxGap) stMaxGap = gap
+            if (gap > 100) stG100++
+            if (gap > 250) stG250++
+            if (gap > 500) stG500++
+        }
+        stLastRender = now
+        stFrames++
+    }
+
+    // Decode thread: once a second, print the window's counters.
+    private fun statsTick() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (stWinStart == 0L) { stWinStart = now; return }
+        if (now - stWinStart < 1000) return
+        val r = udpReasm ?: return
+        val ongoing = if (stLastRender != 0L) now - stLastRender else 0L
+        val maxGap = maxOf(stMaxGap, ongoing)
+        val ok = r.nalsOk; val lost = r.nalsLost; val fec = r.fragsRecovered; val pk = r.packets
+        val sk = stSkipped
+        Log.i("UDPSTAT", "fps=$stFrames ok=${ok - stPrevOk} lost=${lost - stPrevLost} " +
+            "fec=${fec - stPrevFec} skip=${sk - stPrevSkip} pk=${pk - stPrevPk} maxGap=$maxGap " +
+            "g100=$stG100 g250=$stG250 g500=$stG500")
+        stPrevOk = ok; stPrevLost = lost; stPrevFec = fec; stPrevPk = pk; stPrevSkip = sk
+        stFrames = 0; stMaxGap = 0; stG100 = 0; stG250 = 0; stG500 = 0
+        stWinStart = now
+    }
+
     // UDP transport: reassemble fragmented NALs (12-byte EXUD header) and feed
     // complete ones into the queue. Incomplete NALs (lost fragments) are dropped.
     private fun udpLoop() {
@@ -1102,18 +1357,18 @@ private class H264TcpReceiver(
                 var udpMode = 0  // 0 = undecided, 1 = encrypted (a blob opened), 2 = plaintext
                 var failures = 0
                 var lastAsk = 0L
-                val reasm = UdpReassembler { blob ->
+                val reasm = UdpReassembler({ blob ->
                     if (!running.get()) return@UdpReassembler
                     if (startsWithStartCode(blob)) {
                         if (udpMode != 2) { udpMode = 2; onEncrypted(false) }
-                        nalQueue.offer(QNal(streamGeneration.get(), blob))
+                        deliverUdp(blob)
                         return@UdpReassembler
                     }
                     val s = videoSealer
                     val pt = s?.open(blob, 0, blob.size)
                     if (pt != null) {
                         if (udpMode != 1) { udpMode = 1; failures = 0; onEncrypted(true) }
-                        nalQueue.offer(QNal(streamGeneration.get(), pt))
+                        deliverUdp(pt)
                         return@UdpReassembler
                     }
                     // Sealed, and not openable: no key, or a different pairing code
@@ -1125,12 +1380,25 @@ private class H264TcpReceiver(
                         lastAsk = now
                         onPairingNeeded(if (s == null) PAIR_NEEDS_CODE else PAIR_WRONG_SAVED, blob)
                     }
-                }
+                }, { onUdpLoss() })
+                udpReasm = reasm
+                refreshUdpDevProps()
+                var srcAddr: java.net.InetAddress? = null
+                var srcPort = -1
                 val buf = ByteArray(2048)
                 var announced = false
                 while (running.get()) {
                     val packet = java.net.DatagramPacket(buf, buf.size)
                     sock.receive(packet)
+                    // A different sender (address or port: every sender run opens a
+                    // new socket) is a new stream: its nalSeq starts again at 0.
+                    if (packet.port != srcPort || packet.address != srcAddr) {
+                        if (srcPort != -1) reasm.resetSession()
+                        srcAddr = packet.address
+                        srcPort = packet.port
+                        refreshUdpDevProps()
+                        udpNeedKey = false
+                    }
                     if (!announced) {
                         onStatus("Connected (Wi-Fi/UDP): ${packet.address.hostAddress}")
                         announced = true
@@ -1342,11 +1610,13 @@ private class H264TcpReceiver(
     }
 
     private fun drainOutput(decoder: MediaCodec, info: MediaCodec.BufferInfo, generation: Int) {
+        if (udpStats) statsTick()
         while (true) {
             val outputIndex = decoder.dequeueOutputBuffer(info, 0)
             when {
                 outputIndex >= 0 -> {
                     decoder.releaseOutputBuffer(outputIndex, true)
+                    if (udpStats) statsFrame()
                     frameShown(generation)
                 }
                 outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -1693,6 +1963,12 @@ private class AudioReceiver {
  *
  * Reads in chunks and scans with a sliding window — no per-byte allocations.
  * A NAL is emitted when the next start code is found, or when the stream ends.
+ * The one exception is an access-unit delimiter (H.264 type 9, HEVC type 35):
+ * its length is fixed, so it is emitted as soon as its bytes are in. The Windows
+ * sender appends one right after every frame; the start code it brings ends the
+ * frame's last NAL immediately instead of one frame interval later, when the next
+ * frame's start code arrives. Streams without delimiters (the Mac host, older
+ * senders) are split exactly as before.
  */
 private class AnnexBNalSplitter(private val input: InputStream) {
     private var buffer = ByteArray(1 shl 16)
@@ -1700,6 +1976,23 @@ private class AnnexBNalSplitter(private val input: InputStream) {
     private var scan = 0            // next index to scan for a start code
     private var nalStart = -1       // index where the current NAL begins (start code included)
     private var eof = false
+
+    // Dev-only hold measurement (adb shell setprop debug.extdisplay.hold 1, then
+    // reconnect): how long a NAL's last byte sat in the splitter before the NAL
+    // was handed on. Off by default; costs one boolean test per NAL.
+    private val stats = HoldStats.create()
+    private var readStart = 0       // buffer index where the latest read's bytes begin
+    private var readTime = 0L       // when the latest read returned (ns)
+    private var prevReadTime = 0L   // ... and the one before it
+
+    private fun emitted(nalEnd: Int) {
+        // nalEnd: exclusive end of the NAL just cut out. If its last byte came in
+        // with the latest read it waited for nothing; otherwise it waited since the
+        // read before (the start code that ended it was in the latest read).
+        if (!stats.on) return
+        val held = if (nalEnd - 1 >= readStart) 0L else readTime - prevReadTime
+        stats.add(held)
+    }
 
     fun nextNal(): ByteArray? {
         while (true) {
@@ -1716,9 +2009,24 @@ private class AnnexBNalSplitter(private val input: InputStream) {
             val next = findStartCode(scan)
             if (next >= 0) {
                 val nal = buffer.copyOfRange(nalStart, next)
+                emitted(next)
                 compact(next)
+                readStart -= next
                 nalStart = 0
                 scan = startCodeLengthAt(0)
+                return nal
+            }
+
+            val audLen = completeAudLength()
+            if (audLen > 0) {
+                val nal = buffer.copyOfRange(nalStart, nalStart + audLen)
+                emitted(nalStart + audLen)
+                compact(nalStart + audLen)
+                readStart -= nalStart + audLen
+                // What follows is the next start code (or the start of one): look
+                // for it from the top, like at the start of a stream.
+                nalStart = -1
+                scan = 0
                 return nal
             }
 
@@ -1751,8 +2059,30 @@ private class AnnexBNalSplitter(private val input: InputStream) {
             eof = true
             return false
         }
+        if (stats.on) {
+            prevReadTime = readTime
+            readTime = android.os.SystemClock.elapsedRealtimeNanos()
+            readStart = size
+        }
         size += n
         return true
+    }
+
+    /**
+     * Length (start code included) of the current NAL if it is a complete AUD, else
+     * 0. An AUD's payload is one byte (3-bit picture type + stop bit + zeros), so
+     * once that byte is here the NAL is whole. The checks are tight (exact header
+     * bytes and the stop-bit pattern) so no other NAL type can be mistaken for one.
+     */
+    private fun completeAudLength(): Int {
+        if (nalStart < 0) return 0
+        val sc = startCodeLengthAt(nalStart)
+        val h = nalStart + sc
+        if (size > h + 1 && buffer[h] == 0x09.toByte() &&
+            (buffer[h + 1].toInt() and 0x1F) == 0x10) return sc + 2          // H.264
+        if (size > h + 2 && buffer[h] == 0x46.toByte() && buffer[h + 1] == 0x01.toByte() &&
+            (buffer[h + 2].toInt() and 0x1F) == 0x10) return sc + 3          // HEVC
+        return 0
     }
 
     private fun compact(from: Int) {
@@ -1784,5 +2114,35 @@ private class AnnexBNalSplitter(private val input: InputStream) {
             buffer[offset + 3] == 1.toByte()
         ) return 4
         return 3
+    }
+}
+
+/** Dev-only once-per-second log of NAL hold times; see AnnexBNalSplitter. */
+private class HoldStats private constructor(val on: Boolean) {
+    private var n = 0
+    private var held = 0
+    private var sumNs = 0L
+    private var sumHeldNs = 0L
+    private var maxNs = 0L
+    private var last = android.os.SystemClock.elapsedRealtime()
+
+    fun add(ns: Long) {
+        n++; sumNs += ns; if (ns > maxNs) maxNs = ns; if (ns > 1_000_000L) { held++; sumHeldNs += ns }
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - last >= 1000) {
+            Log.i(TAG, "HOLD[rx-splitter] nals=$n held>1ms=$held avg=${"%.2f".format(sumNs / 1e6 / n)}ms avgHeld=${"%.2f".format(if (held > 0) sumHeldNs / 1e6 / held else 0.0)}ms max=${"%.2f".format(maxNs / 1e6)}ms")
+            n = 0; held = 0; sumNs = 0; sumHeldNs = 0; maxNs = 0; last = now
+        }
+    }
+
+    companion object {
+        fun create(): HoldStats {
+            val on = try {
+                val c = Class.forName("android.os.SystemProperties")
+                c.getMethod("get", String::class.java, String::class.java)
+                    .invoke(null, "debug.extdisplay.hold", "0") == "1"
+            } catch (_: Throwable) { false }
+            return HoldStats(on)
+        }
     }
 }

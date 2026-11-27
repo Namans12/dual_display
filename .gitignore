@@ -41,3 +41,8 @@ installers/windows/dist/
 installers/mac/dist/
 installers/mac/staging/
 installers/mac/.cache/
+
+# Signing secrets never belong in the repo (see docs/signing.md).
+*.jks
+*.keystore
+signing.properties

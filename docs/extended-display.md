@@ -47,7 +47,7 @@ longer picked automatically.
 
 1. Run `ExtendedDisplaySender.exe --list-displays`. After the sender has tried to
    activate it you want a row flagged `virtual`. No such row: the driver is missing
-   or not loaded (start from `ExtendedDisplay.exe`, which loads it).
+   or not loaded (start from `DualSlate.exe`, which loads it).
 2. Driver not installed? Re-run the installer with the **virtual display driver**
    task ticked (it runs `install-vdd.ps1`: trusts the cert, `pnputil`/`devcon`
    installs the driver, writes the config).
