@@ -26,6 +26,12 @@
   - three AVI and delimiter edge cases.
 - **The PC app is now `DualSlate.exe`.** File details say DualSlate. Upgrades remove the old
   exe and all old "Extended Display" shortcuts, including on the user's own desktop.
+- **Fixed: the v0.11.0 installer could not install the virtual display on normal (x64) PCs.**
+  It bundled the ARM64 build of the driver: the payload script took the first driver folder in
+  the release archive. It now picks the x64 build. The installer also refuses a driver that
+  doesn't match the PC, keeps a log (install-vdd.log), and the app says "Driver failed" if it
+  still can't install. Verified: "Drivers installed successfully" without a restart.
+- **Installer publisher** is now Namans12 (it said HeySnap).
 - **Installer** (found by a full uninstall and reinstall test):
   - The uninstaller no longer turns off real external monitors (it used to apply "laptop
     screen only").
