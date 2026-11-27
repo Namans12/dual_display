@@ -13,7 +13,8 @@ if (Test-Path $sender) { & $sender --cleanup | Out-Null }
 
 # A driver install still waiting for a restart (install-vdd.ps1) must not run later.
 Unregister-ScheduledTask -TaskName 'DualSlate driver setup' -Confirm:$false -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $AppDir 'driver-pending.flag') -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $AppDir 'driver-pending.flag'), (Join-Path $AppDir 'driver-failed.flag'),
+    (Join-Path $AppDir 'install-vdd.log') -ErrorAction SilentlyContinue
 
 $devcon = Join-Path $vdd 'devcon.exe'
 if (Test-Path $devcon) {

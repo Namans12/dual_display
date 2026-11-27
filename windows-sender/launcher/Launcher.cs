@@ -862,6 +862,15 @@ namespace ExtendedDisplay
                 SetDetail("Restart Windows once to finish installing the virtual display driver. It completes by itself during the restart; then open DualSlate again.");
                 return;
             }
+            if (r == Vdd.Result.NotInstalled &&
+                File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "driver-failed.flag")))
+            {
+                SetState(AppState.Fault);
+                SetPill("Driver failed", Tone.Bad);
+                SetDetail("The virtual display driver could not be installed on this PC. Details: install-vdd.log in " +
+                          AppDomain.CurrentDomain.BaseDirectory + " - please attach it to a GitHub issue.");
+                return;
+            }
             if (r == Vdd.Result.NotInstalled)
             {
                 SetState(AppState.Fault);
